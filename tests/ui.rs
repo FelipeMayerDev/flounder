@@ -638,6 +638,23 @@ fn pluggy_card(id: &str, bank: &str, owner: u8, last: &str, limit: f64, availabl
 }
 
 /// Domicílio fictício (Ana e Bruno): demonstração + compras e movimentos importados, cartões e contas.
+/// Marca um checkbox da interface (clica pelo AccessKit até o estado mudar).
+fn checkbox(hs: &mut Harness<'static, App>, label: &str) {
+    let before = |hs: &Harness<'static, App>| match label {
+        "Remover renda compartilhada" => hs.state().data.shared_split_off,
+        _ => hs.state().form.as_ref().map(|f| f.parcelar).unwrap_or(false),
+    };
+    let initial = before(hs);
+    for _ in 0..3 {
+        hs.get_by_label(label).click_accesskit();
+        hs.run();
+        if before(hs) != initial {
+            return;
+        }
+    }
+    panic!("o checkbox \"{label}\" não mudou de estado");
+}
+
 fn rich_state() -> (flounder::api::State, Vec<Entry>) {
     use flounder::api::Account;
     let mut state = fake_state();
@@ -664,7 +681,7 @@ fn rich_state() -> (flounder::api::State, Vec<Entry>) {
     let mut add = |desc: &str, cents, month: Month, day, kind, category, owner, card: Option<&str>| {
         let id = 900 + entries.len() as u32;
         entries.push(Entry { id, desc: desc.into(), amount: cents, date: month.day(day), kind, category, owner, shared: false,
-            card: None, connected: card.map(Into::into), imported: true, paid: true });
+            card: None, connected: card.map(Into::into), imported: true, paid: true, recurring: false });
     };
     use Category as C;
     use Kind::{Expense, Income};
@@ -821,22 +838,24 @@ fn cash_flow_lists_filters_and_copies_previous_month() {
     assert!(hs.query_by_label_contains("Bruno R$").is_none());
     // Mês vazio: estado vazio e cópia do mês anterior (só manuais sem cartão, uma vez).
     hs.get_by_label("Casal").click();
-    hs.state_mut().set_month(nov().add(2));
+    // Janeiro tem a última parcela da viagem com os amigos; fevereiro é que está vazio.
+    hs.state_mut().set_month(nov().add(3));
     hs.run();
-    assert!(hs.query_by_label("Nenhum lançamento em janeiro.").is_some());
+    assert!(hs.query_by_label("Nenhum lançamento em fevereiro.").is_some());
     assert!(hs.query_by_label("Adicionar lançamento").is_some());
-    let dec = nov().add(1);
-    let expected = hs.state().data.in_month(dec).filter(|e| Origin::of(e) == Origin::Manual).count();
+    let jan = nov().add(2);
+    let expected = hs.state().data.in_month(jan).filter(|e| Origin::of(e) == Origin::Manual).count();
     let _ = commands.try_iter().count();
     hs.get_by_label("Copiar do mês anterior").click();
     hs.run();
-    assert!(hs.query_by_label(&format!("{expected} lançamentos copiados de dezembro.")).is_some());
+    let note = if expected == 1 { "1 lançamento copiado de janeiro.".into() } else { format!("{expected} lançamentos copiados de janeiro.") };
+    assert!(hs.query_by_label(&note).is_some());
     assert_eq!(commands.try_iter().filter(|c| matches!(c, Cmd::Entry(e) if e.id >= 1 << 31 && !e.paid)).count(), expected);
-    assert!(hs.state().data.in_month(nov().add(2)).all(|e| Origin::of(e) == Origin::Manual && !e.paid));
+    assert!(hs.state().data.in_month(nov().add(3)).all(|e| Origin::of(e) == Origin::Manual && !e.paid));
     hs.get_by_label("Copiar do mês anterior").click();
     hs.run();
-    assert!(hs.query_by_label_contains("Nada a copiar de dezembro").is_some());
-    hs.get_all_by_label_contains("Abrir Aluguel").next().unwrap().click();
+    assert!(hs.query_by_label_contains("Nada a copiar de janeiro").is_some());
+    hs.get_all_by_label_contains("Abrir Viagem com os amigos").next().unwrap().click();
     hs.run();
     assert!(hs.query_by_label("Editar lançamento").is_some());
 }
@@ -1096,4 +1115,141 @@ fn house_reserve_settings_screenshots() {
     hs.state_mut().screen = Screen::Settings;
     hs.run();
     hs.render().unwrap().save(dir.join("ajustes-completo.png")).unwrap();
+}
+
+// ───────────────────────── Parcelas, contas fixas e rateio pela renda ─────────────────────────
+
+#[test]
+fn form_creates_manual_installments_month_by_month() {
+    let mut hs = harness(App::new(), 1440.0, 900.0, 1.0);
+    hs.get_by_label("Adicionar").click();
+    hs.run();
+    let f = hs.state_mut().form.as_mut().unwrap();
+    f.desc = "Viagem dos amigos".into();
+    f.amount = "120".into();
+    hs.run();
+    // Ainda sem marcar: salvar cria um lançamento único, sem sufixo.
+    hs.get_by_label("Salvar").click();
+    hs.run();
+    assert!(hs.state().form.is_none());
+    assert!(hs.state().data.entries.iter().all(|e| !e.desc.contains("Viagem dos amigos (")));
+
+    // De novo, agora parcelado: 4 pagamentos mensais de 120.
+    hs.get_by_label("Adicionar").click();
+    hs.run();
+    let f = hs.state_mut().form.as_mut().unwrap();
+    f.desc = "Viagem dos amigos".into();
+    f.amount = "120".into();
+    hs.run();
+    checkbox(&mut hs, "Parcelar em vários meses");
+    assert!(hs.state().form.as_ref().unwrap().parcelar);
+    hs.state_mut().form.as_mut().unwrap().parcels = "4".into();
+    hs.run();
+    assert!(hs.query_by_label_contains("4 pagamentos mensais de R$ 120,00 · total R$ 480,00").is_some());
+    hs.get_by_label("Salvar").click();
+    hs.run();
+    assert!(hs.state().form.is_none());
+    // Uma parcela por mês, todas com o mesmo valor e só a primeira paga.
+    for i in 1..=4u32 {
+        let m = nov().add(i as i32 - 1);
+        let e = hs.state().data.in_month(m).find(|e| e.desc == format!("Viagem dos amigos ({i}/4)"));
+        let e = e.unwrap_or_else(|| panic!("falta a parcela {i}/4 em {}", m.short()));
+        assert_eq!(e.amount, 12_000);
+        assert!(!e.paid, "a parcela nasce a pagar; marcar é com a fatura/pagamento");
+    }
+}
+
+#[test]
+fn existing_payment_can_be_marked_as_an_installment() {
+    let mut hs = harness(App::new(), 1440.0, 900.0, 1.0);
+    hs.get_by_label_contains("Abrir Ajuda pra família").scroll_to_me();
+    hs.run();
+    hs.get_by_label_contains("Abrir Ajuda pra família").click();
+    hs.run();
+    checkbox(&mut hs, "Marcar como parcela de uma compra");
+    let f = hs.state_mut().form.as_mut().unwrap();
+    assert!(f.parcelar);
+    f.parcels = "3".into();
+    f.parcela_n = "2".into();
+    hs.run();
+    hs.get_by_label("Salvar").click();
+    hs.run();
+    assert!(hs.state().form.is_none());
+    // Esta é a parcela 2 de 3; só falta a última, no mês que vem.
+    assert!(hs.state().data.entries.iter().any(|e| e.desc == "Ajuda pra família (2/3)" && e.amount == 80_000));
+    let last = hs.state().data.in_month(nov().add(1)).find(|e| e.desc == "Ajuda pra família (3/3)").unwrap();
+    assert!(!last.paid);
+    assert!(!hs.state().data.entries.iter().any(|e| e.desc.ends_with("(1/3)")));
+}
+
+#[test]
+fn forecast_lists_the_fixed_bills_a_future_month_is_missing() {
+    use flounder::app::Screen;
+    let (state, entries) = rich_state();
+    let (mut hs, _replies, commands) = signed_in(state, entries, 1440.0, 1600.0);
+    // Janeiro (a última parcela da viagem é a única conta) mostra a previsão das fixas.
+    hs.state_mut().set_month(nov().add(2));
+    hs.state_mut().screen = Screen::CashFlow;
+    hs.run();
+    assert!(hs.query_by_label("Previsão das contas fixas de janeiro").is_some());
+    let aluguel = hs.state().data.forecast(nov().add(2), None).iter().find(|f| f.desc == "Aluguel").unwrap().clone();
+    assert_eq!((aluguel.estimate, aluguel.min, aluguel.max), (380_000, 380_000, 380_000));
+    assert!(hs.query_by_label_contains("sempre R$ 3.800,00").is_some());
+    // Luz oscila: a linha traz a faixa e a média.
+    let luz = hs.state().data.forecast(nov().add(2), None).iter().find(|f| f.desc == "Luz").unwrap().clone();
+    assert!(luz.min < luz.estimate && luz.estimate < luz.max);
+    hs.get_by_label("Lançar Aluguel").click();
+    hs.run();
+    let made = hs.state().data.in_month(nov().add(2)).find(|e| e.desc == "Aluguel").unwrap();
+    assert_eq!((made.amount, made.paid, made.recurring), (380_000, false, true));
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::Entry(e) if e.desc == "Aluguel" && e.recurring)));
+    // Lançada a conta, ela sai da previsão.
+    assert!(hs.state().data.forecast(nov().add(2), None).iter().all(|f| f.desc != "Aluguel"));
+    // No mês passado (com todas as contas já lançadas) a previsão não aparece.
+    hs.state_mut().set_month(nov());
+    hs.run();
+    assert!(hs.query_by_label_contains("Previsão das contas fixas").is_none());
+}
+
+#[test]
+fn settings_show_the_income_split_and_can_turn_shared_expenses_off() {
+    use flounder::app::Screen;
+    let (state, entries) = rich_state();
+    let (mut hs, _replies, commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().screen = Screen::Settings;
+    hs.run();
+    // Renda registrada: Ana 57% e Bruno 43% (salários + PIX extra de Ana).
+    assert!(hs.query_by_label_contains("Ana paga 57% e Bruno paga 43%").is_some());
+    checkbox(&mut hs, "Remover renda compartilhada");
+    assert!(hs.state().data.shared_split_off);
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::Settings(s) if s.shared_split_off)));
+
+    // Nossa casa sem rateio: despesas da casa por inteiro para quem pagou, sem acertos.
+    hs.state_mut().screen = Screen::House;
+    hs.run();
+    assert!(hs.query_by_label("Despesas da casa").is_some());
+    assert!(hs.query_by_label_contains("O rateio compartilhado está desligado").is_some());
+    assert!(hs.query_by_label("Registrar acerto").is_none());
+
+    // E o painel também explica, no bloco da divisão.
+    hs.state_mut().screen = Screen::Home;
+    hs.run();
+    assert!(hs.query_by_label_contains("Rateio desligado").is_some());
+}
+
+#[test]
+fn house_screen_splits_shared_bills_by_income() {
+    use flounder::app::Screen;
+    let (state, entries) = rich_state();
+    let (mut hs, _replies, _commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().screen = Screen::House;
+    hs.run();
+    assert!(hs.query_by_label_contains("Rateio pela renda: Ana 57% · Bruno 43%.").is_some());
+    assert!(hs.query_by_label_contains("Parte de cada um em novembro").is_some());
+    // O acerto prefere quem pagou além da própria parte.
+    let s = hs.state().data.summary(nov(), Mode::Couple);
+    assert!(s.owed[0] > s.owed[1], "Ana ganha mais, então cabe a ela a parte maior");
+    hs.get_by_label("Registrar acerto").scroll_to_me();
+    hs.run();
+    assert!(hs.query_by_label("Registrar acerto").is_some());
 }

@@ -1,5 +1,6 @@
 //! Cliente do backend: busca `GET /api/state` a cada 5 s e grava lançamentos, acertos, reserva,
-//! nomes e bancos das conexões, numa thread própria.
+//! nomes e bancos das conexões, numa thread própria. Também fala com o assistente (análises e
+//! conversa, que podem levar dezenas de segundos).
 //! A interface só troca mensagens por canal; nada de rede na thread da interface.
 
 use crate::api;
@@ -11,6 +12,8 @@ use std::time::{Duration, Instant};
 const POLL: Duration = Duration::from_secs(5);
 /// `POST /api/sync` reimporta tudo da Pluggy e pode levar dezenas de segundos.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(90);
+/// O GLM pensa antes de responder: conversa e análises têm folga.
+const ASSISTANT_TIMEOUT: Duration = Duration::from_secs(150);
 const RUN_LOCAL: &str = "Execute backend/run-local.sh e tente novamente.";
 const UNEXPECTED: &str = "Resposta inesperada do backend.";
 
@@ -23,6 +26,10 @@ pub enum Msg {
     Offline(String),
     /// Fim de `Cmd::Sync` (a thread recarrega o estado em seguida).
     Synced(Result<api::SyncResult, String>),
+    /// Análises do assistente (a do casal e a de quem usa o app).
+    Reports(api::AssistantReports),
+    /// Resposta da conversa com o assistente; `Some` com a mensagem em caso de erro.
+    Chat(Result<String, String>),
 }
 
 /// Thread de sincronização de um membro (`client-N`). Soltar a struct encerra a thread
@@ -45,6 +52,14 @@ pub enum Cmd {
     Member(u8, String),
     /// Banco escolhido para a conexão (`item_id`); `None` = não informado.
     Institution(String, Option<String>),
+    /// Ajustes do domicílio (rateio compartilhado).
+    Settings(api::Settings),
+    /// Pede as análises do assistente (responde com `Msg::Reports`).
+    Reports,
+    /// Pede novas análises agora ("Analisar de novo"); as análises chegam por `Msg::Reports`.
+    Analyze,
+    /// Conversa com o assistente: todo o histórico, mais recente por último.
+    Chat(Vec<api::ChatMsg>),
 }
 
 pub struct Worker {
@@ -85,6 +100,7 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
     let auth = format!("Bearer {token}");
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(5))).build().into();
     let slow: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(SYNC_TIMEOUT)).build().into();
+    let ai: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(ASSISTANT_TIMEOUT)).build().into();
     let mut ids: HashMap<String, u32> = HashMap::new();
     let mut next_id = 1;
     // "local-N" → UUID dos acertos criados por este aparelho.
@@ -92,6 +108,15 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
     let put = |path: String, body: String| -> Result<(), String> {
         agent.put(format!("{base}{path}")).header("Authorization", &auth).header("Content-Type", "application/json")
             .send(&body).map(drop).map_err(|err| describe(err, base))
+    };
+    let get_json = |agent: &ureq::Agent, path: &str| -> Result<String, String> {
+        agent.get(format!("{base}{path}")).header("Authorization", &auth).call()
+            .and_then(|mut r| r.body_mut().read_to_string())
+            .map_err(|err| describe(err, base))
+    };
+    let reports = |agent: &ureq::Agent| -> Option<api::AssistantReports> {
+        let body = get_json(agent, "/api/assistant/reports").ok()?;
+        serde_json::from_str(&body).ok()
     };
     loop {
         let state = agent.get(format!("{base}/api/state")).header("Authorization", &auth).call()
@@ -105,6 +130,10 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
                     to_model(&e, id)
                 }).collect();
                 send(Msg::State(Box::new(state), entries));
+                // As análises chegam junto: quando o backend termina de gerar, o agente flutuante se atualiza.
+                if let Some(r) = reports(&agent) {
+                    send(Msg::Reports(r));
+                }
             }
             Err(e) => send(Msg::Offline(e)),
         }
@@ -169,7 +198,30 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
                         break;
                     }
                 }
-                Ok(cmd @ (Cmd::Settle(_) | Cmd::Unsettle(_) | Cmd::Reserve(_) | Cmd::Member(..) | Cmd::Institution(..))) => {
+                Ok(Cmd::Reports) => {
+                    if let Some(r) = reports(&agent) {
+                        send(Msg::Reports(r));
+                    }
+                }
+                // O backend responde 202 na hora e gera em segundo plano; as análises prontas
+                // chegam na próxima busca.
+                Ok(Cmd::Analyze) => {
+                    let result = ai.post(format!("{base}/api/assistant/refresh")).header("Authorization", &auth).send_empty()
+                        .map(drop).map_err(|err| describe(err, base));
+                    if result.is_ok() && let Some(r) = reports(&ai) {
+                        send(Msg::Reports(r));
+                    }
+                }
+                Ok(Cmd::Chat(history)) => {
+                    let result = ai.post(format!("{base}/api/assistant/chat")).header("Authorization", &auth)
+                        .header("Content-Type", "application/json")
+                        .send(&serde_json::to_string(&api::ChatRequest { messages: history }).expect("ChatRequest serializa"))
+                        .and_then(|mut r| r.body_mut().read_to_string())
+                        .map_err(|err| describe(err, base))
+                        .and_then(|body| serde_json::from_str::<api::ChatReply>(&body).map_err(|_| UNEXPECTED.to_string()));
+                    send(Msg::Chat(result.map(|r| r.content)));
+                }
+                Ok(cmd @ (Cmd::Settle(_) | Cmd::Unsettle(_) | Cmd::Reserve(_) | Cmd::Member(..) | Cmd::Institution(..) | Cmd::Settings(_))) => {
                     let (what, result) = match cmd {
                         Cmd::Settle(s) => {
                             let body = serde_json::to_string(&api::Settlement {
@@ -207,6 +259,10 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
                         Cmd::Institution(item, key) => (
                             "Não foi possível salvar o banco da conexão.",
                             put(format!("/api/connections/{item}/institution"), serde_json::to_string(&api::ConnectionInstitution { institution_key: key }).expect("serializa")),
+                        ),
+                        Cmd::Settings(s) => (
+                            "Não foi possível salvar os ajustes.",
+                            put("/api/settings".into(), serde_json::to_string(&s).expect("Settings serializa")),
                         ),
                         _ => unreachable!(),
                     };
@@ -305,6 +361,7 @@ pub fn to_api(e: &Entry) -> api::Entry {
         paid: e.paid,
         card: e.connected.clone(),
         imported: e.imported,
+        recurring: e.recurring,
     }
 }
 
@@ -331,6 +388,7 @@ pub fn to_model(e: &api::Entry, id: u32) -> Option<Entry> {
         connected: if e.kind == "expense" { e.card.clone() } else { None },
         imported: e.imported,
         paid: e.paid,
+        recurring: e.recurring,
     })
 }
 

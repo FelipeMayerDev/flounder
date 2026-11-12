@@ -28,6 +28,9 @@ pub struct State {
     /// Acertos entre o casal (quem transferiu para quem, para zerar a divisão da casa).
     #[serde(default)]
     pub settlements: Vec<Settlement>,
+    /// Despesas compartilhadas contam por inteiro para quem paga (sem rateio pela renda).
+    #[serde(default)]
+    pub shared_split_off: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -138,6 +141,9 @@ pub struct Entry {
     /// Pode ser editado; excluir um importado faz a transação não voltar nas próximas importações.
     #[serde(default)]
     pub imported: bool,
+    /// Conta fixa: repete todo mês e entra na previsão dos meses futuros.
+    #[serde(default)]
+    pub recurring: bool,
 }
 
 /// `GET /api/state` → `reserve`; `PUT /api/reserve` (corpo `Reserve`) cria ou substitui a meta
@@ -159,4 +165,60 @@ pub struct BillPaid {
     /// "AAAA-MM-DD".
     pub due: String,
     pub paid: bool,
+}
+
+/// Corpo de `PUT /api/settings` (204): ajustes do domicílio, valem para os dois membros.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Settings {
+    /// Desconsidera o rateio: despesa compartilhada pesa por inteiro para quem pagou,
+    /// e as telas de rateio e acertos saem do aplicativo.
+    #[serde(default)]
+    pub shared_split_off: bool,
+}
+
+// ───────────────────────── Assistente (GLM via Z.ai) ─────────────────────────
+
+/// Análise gerada pelo backend: uma por pessoa (`subject` 0/1) e uma para o casal (`subject` 2).
+/// O backend só devolve ao membro a própria e a do casal.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AssistantReport {
+    /// 0 = membro na posição 0, 1 = posição 1, 2 = casal.
+    pub subject: u8,
+    /// Conteúdo em texto simples, bem-humorado, gerado pelo GLM.
+    pub content: String,
+    /// ISO 8601 UTC da geração.
+    pub generated_at: String,
+    /// Período analisado, "AAAA-MM-DD".
+    pub period_start: String,
+    pub period_end: String,
+}
+
+/// Resposta de `GET /api/assistant/reports`, já filtrada pela privacidade de quem pergunta.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct AssistantReports {
+    /// Falso quando o backend não tem `ZAI_TOKEN` configurado.
+    pub enabled: bool,
+    /// Geração em andamento no backend (análise diária ou "Analisar agora").
+    pub busy: bool,
+    pub reports: Vec<AssistantReport>,
+}
+
+/// Uma mensagem do histórico de conversa com o assistente.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChatMsg {
+    /// "user" ou "assistant".
+    pub role: String,
+    pub content: String,
+}
+
+/// Corpo de `POST /api/assistant/chat` (todo o histórico, mais recente por último).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatRequest {
+    pub messages: Vec<ChatMsg>,
+}
+
+/// Resposta de `POST /api/assistant/chat`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatReply {
+    pub content: String,
 }

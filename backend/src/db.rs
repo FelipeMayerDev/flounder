@@ -3,7 +3,7 @@ use crate::connected::{ConnectedBill, ConnectedCard, cents, identify, iso_date};
 use tokio::sync::{MappedMutexGuard, MutexGuard};
 use tokio_postgres::{Client, NoTls, Row};
 
-const MIGRATIONS: [(i32, &str); 5] = [
+const MIGRATIONS: [(i32, &str); 6] = [
     (1, include_str!("../migrations/001_initial.sql")),
     (
         2,
@@ -12,12 +12,17 @@ const MIGRATIONS: [(i32, &str); 5] = [
     (3, include_str!("../migrations/003_sync_and_settlements.sql")),
     (4, include_str!("../migrations/004_more_categories.sql")),
     (5, include_str!("../migrations/005_past_invoices_paid.sql")),
+    (
+        6,
+        include_str!("../migrations/006_assistant_and_split.sql"),
+    ),
 ];
-const HOUSEHOLD: &str = "(SELECT household_id FROM members WHERE client_user_id = $1)";
+pub(super) const HOUSEHOLD: &str = "(SELECT household_id FROM members WHERE client_user_id = $1)";
 const ENTRY: &str = "e.id::text, e.description, e.amount_cents, to_char(e.entry_date, 'YYYY-MM-DD'), \
     e.kind, e.category_key, e.shared, m.position, e.paid, \
     (SELECT a.external_id FROM cards c JOIN bank_accounts a ON a.id = c.account_id WHERE c.id = e.card_id), \
-    EXISTS (SELECT 1 FROM bank_transactions t WHERE t.entry_id = e.id)";
+    EXISTS (SELECT 1 FROM bank_transactions t WHERE t.entry_id = e.id), \
+    e.recurring";
 const NO_CURRENCY: &str = "Moeda não informada";
 
 pub(super) async fn connect(
@@ -79,18 +84,18 @@ fn import_error(_: impl std::fmt::Display) -> ApiError {
     )
 }
 
-fn not_member() -> ApiError {
+pub(super) fn not_member() -> ApiError {
     ApiError(
         StatusCode::FORBIDDEN,
         "Cliente sem membro cadastrado no banco de dados.",
     )
 }
 
-fn not_found() -> ApiError {
+pub(super) fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "Recurso não encontrado.")
 }
 
-fn bad(message: &'static str) -> ApiError {
+pub(super) fn bad(message: &'static str) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, message)
 }
 
@@ -134,7 +139,7 @@ fn is_uuid(id: &str) -> bool {
 impl Backend {
     /// ponytail: uma conexão compartilhada atrás de um Mutex serializa as consultas; use um pool
     /// (deadpool-postgres) se houver mais que dois usuários simultâneos.
-    async fn db(&self) -> Result<MappedMutexGuard<'_, Client>, ApiError> {
+    pub(super) async fn db(&self) -> Result<MappedMutexGuard<'_, Client>, ApiError> {
         let mut client = self.db.lock().await;
         if client.as_ref().is_none_or(Client::is_closed) {
             *client = Some(connect(&self.config.database).await?);
@@ -648,10 +653,11 @@ fn entry(row: &Row) -> api::Entry {
         paid: row.get(8),
         card: row.get(9),
         imported: row.get(10),
+        recurring: row.get(11),
     }
 }
 
-const UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'"#;
+pub(super) const UTC: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'"#;
 
 pub(super) async fn state(
     State(state): State<Arc<Backend>>,
@@ -821,6 +827,13 @@ pub(super) async fn state(
             to: row.get::<_, i16>(4) as u8,
         })
         .collect();
+    let shared_split_off: bool = db
+        .query_one(
+            &format!("SELECT h.shared_split_off FROM households h WHERE h.id = {HOUSEHOLD}"),
+            &[&user.0],
+        )
+        .await?
+        .get(0);
     Ok(Json(api::State {
         me,
         members,
@@ -831,6 +844,7 @@ pub(super) async fn state(
         connections,
         institutions,
         settlements,
+        shared_split_off,
     }))
 }
 
@@ -897,14 +911,14 @@ pub(super) async fn create_entry(
     let row = db
         .query_one(
             &format!("WITH saved AS (
-                     INSERT INTO entries(household_id, owner_id, description, amount_cents, entry_date, kind, category_key, shared, paid, card_id)
-                     SELECT household_id, id, $3, $4, $5::text::date, $6, $7, $8, $9, $10::text::uuid
+                     INSERT INTO entries(household_id, owner_id, description, amount_cents, entry_date, kind, category_key, shared, paid, card_id, recurring)
+                     SELECT household_id, id, $3, $4, $5::text::date, $6, $7, $8, $9, $10::text::uuid, $11
                      FROM members WHERE household_id = {HOUSEHOLD} AND position = $2
                      RETURNING *)
                  SELECT {ENTRY} FROM saved e JOIN members m ON m.id = e.owner_id"),
             &[
                 &user.0, &i16::from(input.owner), &input.description, &input.amount_cents,
-                &input.date, &input.kind, &input.category, &input.shared, &input.paid, &card,
+                &input.date, &input.kind, &input.category, &input.shared, &input.paid, &card, &input.recurring,
             ],
         )
         .await?;
@@ -926,7 +940,7 @@ pub(super) async fn update_entry(
         .query_opt(
             &format!("WITH saved AS (
                      UPDATE entries e SET owner_id = m.id, description = $4, amount_cents = $5, entry_date = $6::text::date,
-                         kind = $7, category_key = $8, shared = $9, paid = $10, card_id = $11::text::uuid
+                         kind = $7, category_key = $8, shared = $9, paid = $10, card_id = $11::text::uuid, recurring = $12
                      FROM members m
                      WHERE e.id = $2::text::uuid AND e.household_id = {HOUSEHOLD}
                          AND m.household_id = e.household_id AND m.position = $3
@@ -934,7 +948,7 @@ pub(super) async fn update_entry(
                  SELECT {ENTRY} FROM saved e JOIN members m ON m.id = e.owner_id"),
             &[
                 &user.0, &id, &i16::from(input.owner), &input.description, &input.amount_cents,
-                &input.date, &input.kind, &input.category, &input.shared, &input.paid, &card,
+                &input.date, &input.kind, &input.category, &input.shared, &input.paid, &card, &input.recurring,
             ],
         )
         .await?
@@ -1176,6 +1190,26 @@ pub(super) async fn set_connection_institution(
         .await?;
     if updated == 0 {
         return Err(not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ajustes do domicílio (PUT /api/settings): por ora, o interruptor do rateio compartilhado.
+pub(super) async fn put_settings(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Json(input): Json<api::Settings>,
+) -> Result<StatusCode, ApiError> {
+    let updated = state
+        .db()
+        .await?
+        .execute(
+            &format!("UPDATE households SET shared_split_off = $2 WHERE id = {HOUSEHOLD}"),
+            &[&user.0, &input.shared_split_off],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(not_member());
     }
     Ok(StatusCode::NO_CONTENT)
 }

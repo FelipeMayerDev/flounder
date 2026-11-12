@@ -85,6 +85,31 @@ pub fn cash_flow(app: &mut App, ui: &mut Ui) {
         });
     });
 
+    // Contas fixas que este mês ainda não tem: moradia, luz, gás… com o valor estimado
+    // pela média das últimas contas. Um toque lança a conta real no mês.
+    if month >= Month::of(today()) {
+        let forecast: Vec<Recurring> = app.data.forecast(month, (!couple).then_some(me));
+        if !forecast.is_empty() {
+            let mut create = Vec::new();
+            w::card(ui, NORMAL, |ui| {
+                w::title_with_art(ui, &format!("Previsão das contas fixas de {}", month.name().to_lowercase()), Some(w::Art::Calendar));
+                w::caption(ui, "Média das últimas contas marcadas como fixa. Toque em + para lançar a conta real deste mês.");
+                ui.add_space(w::GROUP_GAP);
+                w::list(ui, |ui| {
+                    for f in &forecast {
+                        forecast_row(ui, f, month, couple.then(|| names[f.owner.idx()].as_str()), &mut create);
+                    }
+                });
+                let total: Cents = forecast.iter().map(|f| f.estimate).sum();
+                w::caption(ui, format!("Se tudo se repetir: {} de contas fixas neste mês.", money(total)));
+            });
+            for e in create {
+                let id = app.data.upsert(e);
+                app.push(id);
+            }
+        }
+    }
+
     w::cards_row(ui, NORMAL, &[2.0, 1.0], 300.0, |i, ui| {
         if i == 1 {
             if breakdown.by_category.is_empty() {
@@ -181,6 +206,54 @@ fn account_balances(app: &App, ui: &mut Ui) {
     }
 }
 
+/// Linha da previsão: descrição, vencimento típico, variação recente e botão de lançar.
+fn forecast_row(ui: &mut Ui, f: &Recurring, month: Month, who: Option<&str>, create: &mut Vec<Entry>) {
+    let colors = w::palette(ui.ctx());
+    let income = f.kind == Kind::Income;
+    let estimate = format!("{}{}", if income { "+" } else { "−" }, money(f.estimate));
+    let mut details = format!("vence por volta do dia {} · {}", f.day, f.range());
+    if let Some(who) = who {
+        details = format!("{details} · {who}");
+    }
+    if f.shared {
+        details = format!("{details} · Casa");
+    }
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::hover());
+    r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Lançar {}: {estimate} · {details}", f.desc)));
+    let hover = ui.ctx().animate_bool_with_time(r.id.with("h"), r.hovered(), 0.15);
+    let click = ui.allocate_rect(
+        Rect::from_min_size(pos2(rect.right() - 90.0, rect.center().y - 14.0), vec2(84.0, 28.0)),
+        Sense::click(),
+    ).on_hover_cursor(egui::CursorIcon::PointingHand);
+    click.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Lançar {}", f.desc)));
+    let p = ui.painter();
+    if hover > 0.0 {
+        p.rect_filled(rect.expand2(vec2(6.0, 0.0)), CornerRadius::same(10), colors.hover.gamma_multiply(hover));
+    }
+    let c = pos2(rect.left() + 14.0, rect.center().y);
+    let (ic, fg, bg) = if income { (icon::ARROW_DOWN_LEFT, colors.green, colors.green_soft) } else { (icon::ARROW_UP_RIGHT, colors.muted, colors.faint) };
+    p.circle_filled(c, 14.0, bg);
+    p.text(c, Align2::CENTER_CENTER, ic, w::regular(16.0), fg);
+    let amt = p.layout_no_wrap(estimate, w::semibold(14.0), if income { colors.green } else { colors.text });
+    let st = p.layout_no_wrap("lançar".into(), w::regular(12.0), colors.blue);
+    let right = rect.right() - amt.size().x.max(st.size().x);
+    p.galley(pos2(rect.right() - amt.size().x, rect.center().y - amt.size().y), amt, colors.text);
+    p.galley(pos2(rect.right() - st.size().x, rect.center().y + 2.0), st, colors.blue);
+    if click.clicked() {
+        create.push(f.entry(month));
+    }
+    let x0 = c.x + 24.0;
+    let mut job = egui::text::LayoutJob::simple_singleline(f.desc.clone(), w::regular(14.0), colors.text);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((right - 16.0 - x0).max(20.0));
+    let g = p.layout_job(job);
+    p.galley(pos2(x0, rect.center().y - g.size().y), g, colors.text);
+    let mut job = egui::text::LayoutJob::simple_singleline(details, w::regular(12.0), colors.muted);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((right - 16.0 - x0 - 6.0).max(20.0));
+    let g = p.layout_job(job);
+    p.galley(pos2(x0, rect.center().y + 3.0), g, colors.muted);
+    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, colors.line));
+}
+
 /// Linha de lançamento: tipo, descrição, categoria/pessoa/origem, valor com sinal e situação.
 fn entry_row(ui: &mut Ui, e: &Entry, who: Option<&str>) -> egui::Response {
     let colors = w::palette(ui.ctx());
@@ -199,6 +272,9 @@ fn entry_row(ui: &mut Ui, e: &Entry, who: Option<&str>) -> egui::Response {
     details.extend(who.map(str::to_string));
     if e.shared {
         details.push("Casa".into());
+    }
+    if e.recurring {
+        details.push("Fixa".into());
     }
     let details = details.join(" · ");
     let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
@@ -521,14 +597,19 @@ pub fn name_error(s: &str) -> Option<&'static str> {
 }
 
 /// Casal: despesas compartilhadas do mês, quem pagou, saldo acumulado entre os dois e acertos.
-/// Individual ("Meu orçamento"): orçamento pessoal por categoria e moradia.
+/// Com o rateio desligado, mostra as despesas da casa sem divisão. Individual ("Meu orçamento"):
+/// orçamento pessoal por categoria e moradia.
 pub fn house(app: &mut App, s: &Summary, ui: &mut Ui) {
     if app.mode == Mode::Individual {
         return my_budget(app, s, ui);
     }
+    if app.data.shared_split_off {
+        return house_without_split(app, ui);
+    }
     let colors = w::palette(ui.ctx());
     let month = app.month;
     let names = app.data.names.clone();
+    let weights = app.data.income_weights(month);
     let mut rows: Vec<Entry> = app.data.in_month(month).filter(|e| e.shared && e.kind == Kind::Expense).cloned().collect();
     rows.sort_by_key(|e| Reverse(e.date));
     let mut settlements: Vec<Settlement> = app.data.settlements.iter().filter(|x| Month::of(x.date) <= month).cloned().collect();
@@ -539,12 +620,16 @@ pub fn house(app: &mut App, s: &Summary, ui: &mut Ui) {
             housing_share(s, ui, true);
             ui.add_space(w::GROUP_GAP);
             ui.separator();
-            w::text(ui, format!("Metade de cada um em {}", month.name().to_lowercase()), w::semibold(14.0), colors.text);
+            w::text(ui, format!("Parte de cada um em {}", month.name().to_lowercase()), w::semibold(14.0), colors.text);
             for ((name, owed), color) in names.iter().zip(s.owed).zip(colors.person) {
                 w::kv_dot(ui, Some(color), name, owed, colors.text);
             }
+            w::caption(ui, match weights {
+                Some([wa, wb]) => format!("Rateio pela renda: {} {:.0}% · {} {:.0}%.", names[0], wa * 100.0, names[1], wb * 100.0),
+                None => "Sem renda registrada: metade para cada um.".to_string(),
+            });
             let (ahead, v) = if s.paid_by[0] >= s.owed[0] { (0, s.paid_by[0] - s.owed[0]) } else { (1, s.owed[0] - s.paid_by[0]) };
-            w::caption(ui, if v == 0 { "Neste mês cada um pagou a sua metade.".to_string() } else { format!("Neste mês, {} pagou {} além da própria metade.", names[ahead], money(v)) });
+            w::caption(ui, if v == 0 { "Neste mês cada um pagou a sua parte.".to_string() } else { format!("Neste mês, {} pagou {} além da própria parte.", names[ahead], money(v)) });
             return;
         }
         split_block(app, s, ui, true);
@@ -593,6 +678,37 @@ pub fn house(app: &mut App, s: &Summary, ui: &mut Ui) {
     }
     if unsettle.is_some() {
         app.extra.unsettle = unsettle;
+    }
+}
+
+/// Casal com o rateio desligado: as despesas compartilhadas do mês, cada uma valendo por
+/// inteiro para quem pagou. Sem divisão, sem saldo entre vocês e sem acertos.
+fn house_without_split(app: &mut App, ui: &mut Ui) {
+    let colors = w::palette(ui.ctx());
+    let month = app.month;
+    let names = app.data.names.clone();
+    let mut rows: Vec<Entry> = app.data.in_month(month).filter(|e| e.shared && e.kind == Kind::Expense).cloned().collect();
+    rows.sort_by_key(|e| Reverse(e.date));
+    let mut open = None;
+    w::card(ui, NORMAL, |ui| {
+        w::title_with_art(ui, "Despesas da casa", Some(w::Art::House));
+        w::caption(ui, "O rateio compartilhado está desligado: cada despesa vale por inteiro para quem pagou e nada é dividido entre vocês. Para dividir pela renda de novo, procure \"Gastos compartilhados\" em Ajustes.");
+        ui.add_space(w::GROUP_GAP);
+        if rows.is_empty() {
+            return w::empty_note(ui, &format!("Nenhuma despesa da casa em {}.", month.name().to_lowercase()));
+        }
+        for (k, e) in rows.iter().enumerate() {
+            if k == 0 || rows[k - 1].date != e.date {
+                ui.add_space(if k == 0 { 0.0 } else { 8.0 });
+                w::text(ui, day_title(e.date), w::semibold(13.0), colors.muted);
+            }
+            if entry_row(ui, e, Some(&format!("{} pagou", names[e.owner.idx()]))).clicked() {
+                open = Some(e.id);
+            }
+        }
+    });
+    if let Some(id) = open {
+        app.open_entry(id);
     }
 }
 
@@ -902,7 +1018,7 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
     let names = app.data.names.clone();
     let me = app.data.me.idx();
     let mut save = false;
-    w::card(ui, NORMAL, |ui| {
+    shared_settings(app, ui);    w::card(ui, NORMAL, |ui| {
         w::title(ui, "Nomes");
         w::caption(ui, "Como cada um aparece no app, nos dois computadores.");
         ui.add_space(w::GROUP_GAP);
@@ -1012,6 +1128,34 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
     }
     if refresh {
         app.refresh();
+    }
+}
+
+/// Card "Gastos compartilhados" em Ajustes: divisão pela renda e o interruptor do rateio.
+fn shared_settings(app: &mut App, ui: &mut Ui) {
+    let names = app.data.names.clone();
+    let mut split_off = app.data.shared_split_off;
+    w::card(ui, NORMAL, |ui| {
+        w::title(ui, "Gastos compartilhados");
+        ui.add_space(w::GROUP_GAP);
+        let weights = app.data.income_weights(Month::of(today()));
+        w::caption(ui, match weights {
+            Some([wa, wb]) => format!(
+                "Divisão pela renda registrada nos últimos 3 meses: {} paga {} e {} paga {} das contas compartilhadas.",
+                names[0], w::pct(wa as f32 * 100.0), names[1], w::pct(wb as f32 * 100.0)
+            ),
+            None => "Sem renda registrada nos últimos 3 meses: as contas compartilhadas dividem metade para cada um.".to_string(),
+        });
+        w::caption(ui, "A renda vem dos lançamentos de Receita de vocês; quando um ganha mais, ele cobre mais da conta.");
+        ui.add_space(w::GROUP_GAP);
+        ui.checkbox(&mut split_off, "Remover renda compartilhada")
+            .on_hover_text("Quando ligado, desconsidera tudo relacionado a gasto compartilhado: cada despesa vale por inteiro para quem pagou, sem rateio pela renda e sem acertos.");
+        ui.add_space(w::GROUP_GAP);
+        w::caption(ui, "O ajuste vale para os dois computadores.");
+    });
+    if split_off != app.data.shared_split_off {
+        app.data.shared_split_off = split_off;
+        app.send(Cmd::Settings(crate::api::Settings { shared_split_off: split_off }));
     }
 }
 

@@ -39,6 +39,13 @@ pub struct Form {
     pub connected: Option<String>,
     pub imported: bool,
     pub paid: bool,
+    /// Conta fixa (repete todo mês e entra na previsão dos meses futuros).
+    pub recurring: bool,
+    /// Criar/marcar parcelas: gera os próximos lançamentos com " (i/n)" na descrição.
+    pub parcelar: bool,
+    pub parcels: String,
+    /// Só na edição: o número da parcela que este lançamento já é.
+    pub parcela_n: String,
     pub tried: bool,
     /// "Excluir" clicado: o formulário pede confirmação.
     pub confirm_delete: bool,
@@ -60,6 +67,10 @@ impl Form {
             connected: None,
             imported: false,
             paid: false,
+            recurring: false,
+            parcelar: false,
+            parcels: String::new(),
+            parcela_n: String::new(),
             tried: false,
             confirm_delete: false,
         }
@@ -78,12 +89,16 @@ impl Form {
             connected: e.connected.clone(),
             imported: e.imported,
             paid: e.paid,
+            recurring: e.recurring,
+            parcelar: false,
+            parcels: String::new(),
+            parcela_n: String::new(),
             tried: false,
             confirm_delete: false,
         }
     }
-    /// Erros de descrição, valor e data.
-    pub fn errors(&self) -> [Option<&'static str>; 3] {
+    /// Erros de descrição, valor, data e parcelas.
+    pub fn errors(&self) -> [Option<&'static str>; 5] {
         [
             self.desc.trim().is_empty().then_some("Informe uma descrição."),
             match parse_money(&self.amount) {
@@ -93,7 +108,33 @@ impl Form {
                 Some(_) => None,
             },
             Date::parse(&self.date).is_none().then_some("Use uma data válida no formato dd/mm/aaaa."),
+            (self.parcelar && self.parcela_of().is_none()).then_some("Use um número de 2 a 99."),
+            (self.id != 0 && self.parcelar && self.parcela_atual().is_none())
+                .then_some("De 1 até o total de parcelas."),
         ]
+    }
+    /// (parcela atual, total) quando o lançamento é uma parcela válida.
+    fn parcela_of(&self) -> Option<(u32, u32)> {
+        if !self.parcelar {
+            return None;
+        }
+        let of: u32 = self.parcels.trim().parse().ok()?;
+        let n = if self.id == 0 { 1 } else { self.parcela_atual()? };
+        (n >= 1 && n <= of && (2..=99).contains(&of)).then_some((n, of))
+    }
+    fn parcela_atual(&self) -> Option<u32> {
+        self.parcela_n.trim().parse().ok()
+    }
+    /// Descrição com o sufixo de parcela aplicado, se for o caso.
+    fn titled(&self) -> String {
+        let desc = self.desc.trim().to_string();
+        match self.parcela_of() {
+            None => desc,
+            Some((n, of)) => {
+                let base = split_installment(&desc).map(|(b, _, _)| b).unwrap_or(desc);
+                format!("{base} ({n}/{of})")
+            }
+        }
     }
     fn entry(&self, me: Person) -> Option<Entry> {
         if self.errors().iter().any(Option::is_some) {
@@ -102,7 +143,7 @@ impl Form {
         let shared = self.kind == Kind::Expense && self.shared;
         Some(Entry {
             id: self.id,
-            desc: self.desc.trim().to_string(),
+            desc: self.titled(),
             amount: parse_money(&self.amount)?,
             date: Date::parse(&self.date)?,
             kind: self.kind,
@@ -113,7 +154,25 @@ impl Form {
             connected: if self.kind == Kind::Income { None } else { self.connected.clone() },
             imported: self.imported,
             paid: self.paid,
+            recurring: self.recurring && self.card.is_none() && self.connected.is_none(),
         })
+    }
+    /// Parcelas futuras (da seguinte até a última), quando o lançamento é uma parcela.
+    /// Pagamento por mês via PIX/comprovante: o valor informado é o de cada parcela.
+    pub fn future_entries(&self, e: &Entry) -> Vec<Entry> {
+        let Some((n, of)) = self.parcela_of() else { return Vec::new() };
+        let (base, _, _) = split_installment(&e.desc).unwrap_or((e.desc.clone(), 1, 1));
+        let m = Month::of(e.date);
+        ((n + 1)..=of)
+            .map(|i| Entry {
+                id: 0,
+                desc: format!("{base} ({i}/{of})"),
+                date: m.add((i - n) as i32).day(e.date.d),
+                paid: false,
+                recurring: false,
+                ..e.clone()
+            })
+            .collect()
     }
 }
 
@@ -163,6 +222,8 @@ pub struct App {
     /// Contas marcadas/desmarcadas neste mês: ficam no lugar nas listas "a pagar" até trocar de mês,
     /// para a linha não sumir debaixo do cursor.
     pub touched: Vec<BillRef>,
+    /// Agente flutuante: bolha, análises e conversa com o GLM.
+    pub agent: crate::assistant::Agent,
 }
 
 impl App {
@@ -187,6 +248,7 @@ impl App {
             form: None,
             invoice: None,
             touched: Vec::new(),
+            agent: Default::default(),
         }
     }
 
@@ -248,6 +310,8 @@ impl App {
                         Err(e) => (format!("Não foi possível atualizar. {e}"), true),
                     });
                 }
+                Msg::Reports(reports) => self.agent.on_reports(reports),
+                Msg::Chat(result) => self.agent.on_chat(result),
             }
         }
         if latest.is_some() && r.me.is_some() && std::mem::take(&mut self.auto_sync) && w.tx.send(crate::backend::Cmd::Sync).is_ok() {
@@ -287,6 +351,7 @@ impl App {
         }))).collect();
         self.connected_cards = Some(state.cards);
         self.accounts = state.accounts;
+        self.data.shared_split_off = state.shared_split_off;
         if let Some(r) = &mut self.remote {
             r.members = state.members;
             r.loaded = true;
@@ -462,8 +527,11 @@ impl App {
         crate::screens::modals(self, ui);
         self.invoice_modal(ui);
         self.connected_card_modal(ui);
+        // O agente flutuante vem por último: fica por cima de tudo.
+        if self.remote.as_ref().is_some_and(|r| r.loaded) {
+            crate::assistant::show(self, ui);
+        }
     }
-
 
     /// Antes dos dados: carregando, erro com nova tentativa, ou "Quem é você?".
     fn connecting(&mut self, ui: &mut Ui) {
@@ -704,7 +772,7 @@ impl App {
                 }
                 w::segmented(ui, &mut f.kind, &[(Kind::Expense, "Despesa"), (Kind::Income, "Receita")]);
                 ui.add_space(w::GROUP_GAP);
-                let err = if f.tried { f.errors() } else { [None; 3] };
+                let err = if f.tried { f.errors() } else { [None; 5] };
                 let r = w::field(ui, "Descrição", err[0], |ui| ui.add(w::text_input(&mut f.desc, "Ex.: Conta de luz")));
                 if f.id == 0 && ui.memory(|m| m.focused().is_none()) {
                     r.request_focus();
@@ -738,6 +806,30 @@ impl App {
                         w::caption(ui, "Compra no cartão: o pagamento é feito pela fatura.");
                     }
                 }
+                if f.card.is_none() && f.connected.is_none() {
+                    ui.add_space(w::GROUP_GAP);
+                    ui.checkbox(&mut f.recurring, "Conta fixa (repete todo mês)")
+                        .on_hover_text("Aluguel, luz, internet… aparece como previsão nos meses que ainda não têm essa conta.");
+                    if f.kind == Kind::Expense && split_installment(&f.desc).is_none() {
+                        ui.checkbox(&mut f.parcelar, if f.id == 0 { "Parcelar em vários meses" } else { "Marcar como parcela de uma compra" })
+                            .on_hover_text("O valor informado é o de cada parcela; os próximos meses recebem as demais.");
+                        if f.parcelar {
+                            ui.columns(2, |c| {
+                                w::field(&mut c[0], "Total de parcelas", err[3], |ui| ui.add(w::text_input(&mut f.parcels, "Ex.: 4")));
+                                if f.id != 0 {
+                                    w::field(&mut c[1], "Esta é a parcela nº", err[4], |ui| ui.add(w::text_input(&mut f.parcela_n, "Ex.: 1")));
+                                }
+                            });
+                            if let (Some(amount), Some((_, of))) = (parse_money(&f.amount), f.parcela_of()) {
+                                w::caption(ui, format!("{} pagamentos mensais de {} · total {}", of, money(amount), money(amount * of as Cents)));
+                            }
+                        }
+                    } else if f.kind == Kind::Expense {
+                        if let Some((_, n, of)) = split_installment(&f.desc) {
+                            w::caption(ui, format!("Compra parcelada: esta é a parcela {n} de {of}."));
+                        }
+                    }
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if w::primary_button(ui, "Salvar").clicked() {
@@ -769,7 +861,12 @@ impl App {
         if save && !f.confirm_delete {
             f.tried = true;
             if let Some(e) = f.entry(me) {
+                let extras = f.future_entries(&e);
                 saved = Some(self.data.upsert(e));
+                for extra in extras {
+                    let id = self.data.upsert(extra);
+                    self.push(id);
+                }
                 close = true;
             }
         }

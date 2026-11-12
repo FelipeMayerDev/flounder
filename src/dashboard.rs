@@ -455,6 +455,10 @@ pub(crate) fn split_block(app: &mut App, s: &Summary, ui: &mut Ui, art: bool) {
         return budget_block(s, ui, "Distribuição do orçamento", 6);
     }
     w::title_with_art(ui, "Divisão da casa", art.then_some(w::Art::Scale));
+    if app.data.shared_split_off {
+        w::caption(ui, "Rateio desligado: cada despesa compartilhada é de quem pagou. Para dividir pela renda de novo, procure \"Gastos compartilhados\" em Ajustes.");
+        return;
+    }
     w::group(ui, |ui| {
         w::caption(ui, "Total das contas compartilhadas");
         w::big_money(ui, s.shared_total, 28.0, colors.text);
@@ -477,10 +481,11 @@ pub(crate) fn split_block(app: &mut App, s: &Summary, ui: &mut Ui, art: bool) {
         let pr = ui.painter();
         pr.text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, w::pct(p0), w::semibold(12.0), colors.bg);
         pr.text(r.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, w::pct(100.0 - p0), w::semibold(12.0), colors.bg);
-        let mid = r.center().x;
+        // A linha fica na parte que cabe a cada um (pela renda), não no meio da barra.
+        let mid = r.left() + r.width() * (s.owed[0] as f32 / s.shared_total as f32).clamp(0.0, 1.0);
         pr.line_segment([pos2(mid, r.top() - 4.0), pos2(mid, r.bottom() + 4.0)], Stroke::new(2.0, colors.text));
     }
-    w::caption(ui, "A linha marca a metade que cabe a cada um.");
+    w::caption(ui, "A linha marca a parte que cabe a cada um, pela renda registrada.");
     ui.add_space(w::GROUP_GAP);
     settlement_line(app, s, ui);
 }

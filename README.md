@@ -45,16 +45,29 @@ no executável (`Data::demo()` fica só para testes, capturas e `examples/export
   de cada membro; outras moedas aparecem à parte, sem conversão. **Copiar do mês anterior** traz os
   lançamentos manuais sem cartão do mês anterior, não pagos, no mesmo dia (limitado ao fim do mês),
   pulando os que já existem com mesma descrição, valor e pessoa (no modo Individual, só os seus).
+  **Previsão das contas fixas**: em meses que ainda não têm uma conta marcada como **fixa** (aluguel,
+  condomínio, luz, gás…), o Fluxo mostra a estimativa pela média das últimas três ocorrências, com a
+  variação recente ("entre X e Y") e o vencimento típico — um toque em **lançar** cria a conta real.
+  No mês atual a previsão também aparece, para as contas que ainda faltam.
 - **Cartões** ([captura](docs/screenshots/cartoes-1440.png)): cada cartão conectado (Casal: dos dois;
   Individual: os seus) com limite total/usado/livre, histórico de faturas (marcar como paga) e as compras
   do mês com o total comparado à fatura que vence nele. Clicar numa fatura mostra as compras do mês dela.
-  Simplificação: sem data de fechamento, as compras são as do mês civil.
+  Simplificação: sem data de fechamento, as compras são as do mês civil. O bloco **Parcelas em
+  andamento** inclui também parcelas manuais: no formulário de lançamento, marque **Parcelar em
+  vários meses** (o valor informado é o de cada parcela, por exemplo um PIX mensal de uma viagem com
+  amigos) e o app cria as próximas parcelas nos meses seguintes com " (i/n)" na descrição; para um
+  pagamento que já existe, **Marcar como parcela de uma compra** pede o total e o número da parcela
+  atual e gera as que faltam.
 
 ## Nossa casa, Reserva e Ajustes
 
 - **Nossa casa** ([captura](docs/screenshots/nossa-casa-1440.png)), modo Casal: despesas compartilhadas do mês
-  (dia, descrição, categoria, quem pagou, valor; clique para editar), quanto cada um pagou, a metade de cada um
-  (50/50, `halves`) e o **saldo entre vocês** ("Bruno deve R$ X a Ana" / "Contas equilibradas").
+  (dia, descrição, categoria, quem pagou, valor; clique para editar), quanto cada um pagou, a parte de cada um
+  e o **saldo entre vocês** ("Bruno deve R$ X a Ana" / "Contas equilibradas"). A divisão é **proporcional à
+  renda registrada** nos últimos 3 meses (quem ganha mais cobre mais da conta), sem perder centavo; sem
+  renda registrada, vale metade para cada um. Em **Ajustes → Gastos compartilhados**, **Remover renda
+  compartilhada** desliga tudo relacionado a gasto compartilhado: cada despesa vale por inteiro para quem
+  pagou, e as telas de rateio e acertos saem (`PUT /api/settings`, vale para os dois computadores).
   **Registrar acerto** abre valor (já com o saldo), data e quem pagou → quem recebeu e grava em
   `POST /api/settlements`; a lista de acertos permite excluir (com confirmação, `DELETE /api/settlements/{id}`).
   Também mostra a fatia da renda que vai para moradia. No modo Individual a tela vira **Meu orçamento**
@@ -70,6 +83,27 @@ no executável (`Data::demo()` fica só para testes, capturas e `examples/export
   pessoa com o próprio acesso).
 - Como nos lançamentos, tudo aparece na hora e é gravado em segundo plano; se falhar, aparece o aviso e os dados
   são recarregados. Acertos criados aqui recebem o UUID devolvido pelo `POST` (excluir logo depois funciona).
+
+## Assistente (GLM via Z.ai)
+
+O peixinho **Flounder** vira consultor financeiro: uma bolha animada (nada, pulsa e mostra um ponto
+quando há análise nova) fica no canto da tela; clicar abre o painel com duas abas — **sua análise** e
+**a do casal** — e uma conversa livre.
+
+- **Análises**: o backend resume os últimos 4 meses (renda, despesas por mês e categoria, compartilhadas,
+  reserva, acertos, parcelas em aberto e contas fixas) e o GLM responde em texto bem-humorado: está
+  melhorando ou piorando, o que chama atenção e uma dica prática. As três versões (uma por membro e a do
+  casal) são geradas **no backend** quando os dados mudam (hash dos lançamentos) ou uma vez por dia, e na
+  hora que você pedir com **Analisar agora** (`POST /api/assistant/refresh`); o texto aparece sozinho quando
+  fica pronto.
+- **Privacidade**: quem pergunta pelo `APP_TOKEN_1` recebe só a análise de si e a do casal — a individual
+  do outro nunca sai do servidor, nem na conversa (`GET /api/assistant/reports` já filtra pelo token).
+- **Conversa**: escreva qualquer pergunta; o contexto enviado leva apenas os seus dados e os do casal.
+  A resposta chega por `POST /api/assistant/chat` (até 12 mensagens de histórico).
+- **Configuração**: `ZAI_TOKEN` no `backend/.env` (ou nas variáveis do servidor), opcional; sem o token
+  o agente mostra que está desligado. `ZAI_BASE_URL` (padrão `https://api.z.ai/api/paas/v4`) e
+  `ZAI_MODEL` (padrão `glm-5.3`) cobrem outros planos. O texto do modelo chega limpo (sem markdown) e é
+  revelado com animação de digitação; `FLOUNDER_REDUCED_MOTION=1` mostra tudo de uma vez.
 
 ## Visual e movimento
 
@@ -129,7 +163,12 @@ cargo test --release --test ui -- --ignored screenshots   # regera docs/screensh
 - `tests/ui.rs` (egui_kittest + AccessKit): saldo nos modos individual/casal, calendário, evolução, mudança de mês e mês vazio,
   marcar/desmarcar pagamento, cadastro com validação, edição, alternância individual/casal, atalhos e foco por Tab,
   "Quem é você?" (com estado falso, sem rede), cartões conectados por dono e telas com dados vazios.
-- `src/backend.rs`: ida e volta `api::Entry` ↔ `Entry` (inclui `card`/`imported`) e leitura do token.
+- `src/backend.rs`: ida e volta `api::Entry` ↔ `Entry` (inclui `card`/`imported`/`recurring`) e leitura do token.
+- Parcelas manuais (criar e marcar uma existente), previsão das contas fixas, rateio pela renda com o
+  interruptor de Ajustes e telas de Nossa casa/Ajustes com o rateio desligado.
+- Backend (`backend/src/tests.rs`, precisa de `TEST_DATABASE_URL`): ajustes do domicílio e contas fixas na
+  ida e volta do banco e assistente com um GLM falso — geração única por hash, privacidade das análises
+  (só a própria + a do casal) e conversa.
 - Fluxo de caixa (filtros, cópia do mês anterior), Cartões (limites, faturas, compras, modo Individual),
   exclusão com confirmação e "Atualizar contas", com backend falso. Capturas das telas novas:
   `cargo test --release --test ui -- --ignored new_screen_screenshots`.
@@ -172,6 +211,8 @@ ao lado do executável.
 ## Estrutura
 
 | Arquivo | Papel |
+|---|---|
+| `src/assistant.rs` | Agente flutuante: bolha animada, análises (sua + do casal) e conversa com o GLM. |
 |---|---|
 | `src/model.rs` | Estado e cálculos, sem egui. Dinheiro em centavos (`i64`). Data de hoje. Dados da demonstração (testes). |
 | `src/backend.rs` | Cliente HTTP do backend (ureq) numa thread: token, sincronização e conversão `api::Entry` ↔ `Entry`. |

@@ -1,5 +1,6 @@
 mod local;
 mod db;
+mod assistant;
 #[allow(dead_code)] // Snapshot só é usado pelo desktop.
 #[path = "../../shared/cards.rs"]
 mod connected;
@@ -34,6 +35,11 @@ pub struct Config {
     database: tokio_postgres::Config,
     /// Modo local: `backend/.local/institutions.json` (item → banco) para o proxy MeuPluggy.
     institutions: Option<std::path::PathBuf>,
+    /// Assistente (GLM via Z.ai): token opcional; sem ele, as rotas respondem que o
+    /// assistente não está configurado.
+    zai_token: Option<String>,
+    zai_base: String,
+    zai_model: String,
 }
 
 impl Config {
@@ -89,6 +95,17 @@ impl Config {
             bind,
             database,
             institutions: None,
+            zai_token: lookup("ZAI_TOKEN")
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty() && !s.starts_with("replace_")),
+            zai_base: lookup("ZAI_BASE_URL")
+                .map(|s| s.trim().trim_end_matches('/').to_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.z.ai/api/paas/v4".into()),
+            zai_model: lookup("ZAI_MODEL")
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "glm-5.3".into()),
         };
         if config
             .tokens
@@ -107,14 +124,21 @@ impl Config {
     pub fn pluggy_configured(&self) -> bool {
         !self.client_id.is_empty() && !self.client_secret.is_empty()
     }
+    pub fn assistant_configured(&self) -> bool {
+        self.zai_token.is_some()
+    }
 }
 
 struct Backend {
     config: Config,
     pluggy: Pluggy,
+    /// Assistente GLM (Z.ai); `None` sem `ZAI_TOKEN`.
+    zai: Option<assistant::Zai>,
     db: Mutex<Option<tokio_postgres::Client>>,
     /// Serializa `POST /api/sync`.
     sync: Mutex<()>,
+    /// Serializa a geração de análises do assistente.
+    assist: Mutex<()>,
 }
 
 struct Pluggy {
@@ -152,12 +176,23 @@ fn build_router(
         client_secret: config.client_secret.clone(),
         key: Mutex::new(None),
     };
+    let zai = match &config.zai_token {
+        Some(token) => Some(assistant::Zai::new(
+            token.clone(),
+            config.zai_base.clone(),
+            config.zai_model.clone(),
+        )?),
+        None => None,
+    };
     let state = Arc::new(Backend {
         config,
         pluggy,
+        zai,
         db: Mutex::new(client),
         sync: Mutex::new(()),
+        assist: Mutex::new(()),
     });
+    assistant::spawn_daily(state.clone());
     let private = Router::new()
         .route("/api/connect-token", post(connect_token))
         .route("/api/items/{id}/accounts", get(accounts))
@@ -174,6 +209,14 @@ fn build_router(
         .route("/api/reserve", put(db::put_reserve))
         .route("/api/members/{position}", put(db::rename_member))
         .route("/api/connections/{item_id}/institution", put(db::set_connection_institution))
+        .route("/api/settings", put(db::put_settings))
+        .route("/api/assistant/reports", get(assistant::get_reports))
+        .route("/api/assistant/refresh", post(assistant::post_refresh))
+        .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
+    // A conversa pode levar o histórico inteiro: corpo maior só nela.
+    let chat = Router::new()
+        .route("/api/assistant/chat", post(assistant::post_chat))
+        .layer(DefaultBodyLimit::max(65_536))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
     Ok(Router::new()
         .route("/", get(|| async { Redirect::temporary("/connect") }))
@@ -193,10 +236,15 @@ fn build_router(
         .route(
             "/health",
             get(|State(state): State<Arc<Backend>>| async move {
-                Json(json!({"status": "ok", "pluggyConfigured": state.config.pluggy_configured()}))
+                Json(json!({
+                    "status": "ok",
+                    "pluggyConfigured": state.config.pluggy_configured(),
+                    "assistant": state.config.assistant_configured(),
+                }))
             }),
         )
         .merge(private)
+        .merge(chat)
         .with_state(state)
         .layer(DefaultBodyLimit::max(2048))
         .layer(middleware::from_fn(no_store)))

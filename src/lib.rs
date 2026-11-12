@@ -8,3 +8,4 @@ pub mod connected;
 #[path = "../shared/api.rs"]
 pub mod api;
 pub mod backend;
+pub mod assistant;

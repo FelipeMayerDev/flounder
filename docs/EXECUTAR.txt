@@ -30,13 +30,30 @@ COMO ABRIR
   "Atualizar contas" no menu reimporta tudo (roda também uma vez ao abrir o app).
   Fluxo de caixa: lançamentos do mês por dia, com filtros, busca, totais, saldo em conta e
   "Copiar do mês anterior" (traz os lançamentos manuais do mês anterior, ainda não pagos).
+  Previsão das contas fixas: marque uma conta como "Conta fixa (repete todo mês)" (aluguel,
+  condomínio, luz, gás...) e os meses que ainda não têm essa conta mostram a estimativa
+  pela média das últimas três, com a variação recente; toque em "lançar" para criar a conta
+  real daquele mês.
   Cartões: limites, faturas (marque como paga), compras do mês de cada cartão e
   "Parcelas em andamento" (parcela atual, quantas faltam, valor restante e quanto já está
-  comprometido em cada um dos próximos 6 meses).
+  comprometido em cada um dos próximos 6 meses). Vale também para parcelas manuais:
+  no formulário, marque "Parcelar em vários meses" (o valor informado é o de cada parcela,
+  por exemplo um PIX mensal de uma viagem com amigos) e o app cria as próximas nos meses
+  seguintes; para um pagamento que já existe, "Marcar como parcela de uma compra" pede
+  o total de parcelas e o número da atual, e gera as que faltam.
   Para excluir um lançamento, abra-o e use "Excluir" (pede confirmação).
-  Nossa casa: despesas da casa do mês, quem pagou, a metade de cada um e o saldo entre
-  vocês acumulado até o mês (já com os acertos). "Registrar acerto" grava a transferência
-  que zera o saldo; acertos podem ser excluídos. No modo Individual vira "Meu orçamento".
+  Nossa casa: despesas da casa do mês, quem pagou, a parte de cada um e o saldo entre
+  vocês acumulado até o mês (já com os acertos). A divisão acompanha a renda registrada
+  de vocês (quem ganha mais cobre mais da conta); sem renda registrada, metade para cada.
+  Em Ajustes → "Gastos compartilhados", "Remover renda compartilhada" desliga o rateio:
+  cada despesa fica por inteiro com quem pagou, sem divisão nem acertos.
+  "Registrar acerto" grava a transferência que zera o saldo; acertos podem ser excluídos.
+  No modo Individual vira "Meu orçamento".
+  Flounder, o consultor: a bolha com o peixe no canto da tela abre as análises (a sua e a
+  do casal — a do parceiro é privada, só no computador dele) e uma conversa livre. O
+  backend gera as análises quando os dados mudam e uma vez por dia; "Analisar agora"
+  refaz na hora. Requer ZAI_TOKEN no backend/.env do servidor (sem ele, o agente avisa
+  que está desligado).
   Reserva: meta, progresso, aportes dos últimos 12 meses e em quantos meses a meta chega
   no ritmo atual. "Editar meta" muda nome, valor e saldo inicial.
   Ajustes: nomes do casal, contas conectadas (escolha o banco de cada conexão) e como

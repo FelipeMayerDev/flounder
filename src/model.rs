@@ -318,6 +318,9 @@ pub struct Entry {
     /// Veio da importação de transações do banco/cartão.
     pub imported: bool,
     pub paid: bool,
+    /// Conta fixa (aluguel, luz, assinatura…): repete todo mês e alimenta a previsão
+    /// dos meses futuros, com o valor estimado pela média das últimas ocorrências.
+    pub recurring: bool,
 }
 
 /// De onde veio o lançamento (filtro e selo no Fluxo de caixa).
@@ -421,6 +424,8 @@ pub struct Data {
     pub reserve_goal: Cents,
     pub reserve_name: String,
     pub settlements: Vec<Settlement>,
+    /// Despesa compartilhada vale por inteiro para quem pagou: nada de rateio nem acertos.
+    pub shared_split_off: bool,
     next_id: u32,
 }
 
@@ -461,15 +466,94 @@ pub fn halves(x: Cents) -> [Cents; 2] {
     [x - x / 2, x / 2]
 }
 
+/// Conta fixa estimada para os meses que ainda não a têm: descrição, valor previsto pela
+/// média das últimas ocorrências e a variação recente (mínimo–máximo).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recurring {
+    pub desc: String,
+    pub kind: Kind,
+    pub category: Category,
+    pub owner: Person,
+    pub shared: bool,
+    /// Dia típico do vencimento (o da ocorrência mais recente).
+    pub day: u32,
+    /// Média das últimas ocorrências.
+    pub estimate: Cents,
+    pub min: Cents,
+    pub max: Cents,
+    /// Quantas ocorrências alimentaram a estimativa (1 a 3).
+    pub samples: usize,
+}
+
+impl Recurring {
+    /// Lançamento real a partir da previsão, já no mês escolhido.
+    pub fn entry(&self, m: Month) -> Entry {
+        Entry {
+            id: 0,
+            desc: self.desc.clone(),
+            amount: self.estimate,
+            date: m.day(self.day),
+            kind: self.kind,
+            category: self.category,
+            owner: self.owner,
+            shared: self.shared,
+            card: None,
+            connected: None,
+            imported: false,
+            paid: false,
+            recurring: true,
+        }
+    }
+    /// "entre X e Y" quando houve variação; "sempre X" quando o valor não mudou.
+    pub fn range(&self) -> String {
+        if self.min == self.max {
+            return format!("sempre {}", money(self.estimate));
+        }
+        format!("entre {} e {}", money(self.min), money(self.max))
+    }
+}
+
 impl Data {
     pub fn in_month(&self, m: Month) -> impl Iterator<Item = &Entry> {
         self.entries.iter().filter(move |e| Month::of(e.date) == m)
     }
 
+    /// Proporção da renda de cada um nos últimos 3 meses (até `m`, inclusive).
+    /// `None` sem nenhuma renda registrada: o rateio volta a ser metade para cada um.
+    pub fn income_weights(&self, m: Month) -> Option<[f64; 2]> {
+        let months = [m.add(-2), m.add(-1), m];
+        let mut income = [0 as Cents; 2];
+        for e in &self.entries {
+            if e.kind == Kind::Income && months.contains(&Month::of(e.date)) {
+                income[e.owner.idx()] += e.amount;
+            }
+        }
+        let total = income.iter().sum::<Cents>();
+        (total > 0).then(|| income.map(|v| v as f64 / total as f64))
+    }
+
+    /// Como uma despesa compartilhada se divide entre o casal: proporcional à renda
+    /// registrada do mês dela (50/50 sem renda) ou, com o rateio desligado, por inteiro
+    /// para quem pagou. A soma das partes é sempre o valor exato da despesa.
+    pub fn shared_split(&self, e: &Entry) -> [Cents; 2] {
+        if self.shared_split_off {
+            let mut part = [0; 2];
+            part[e.owner.idx()] = e.amount;
+            return part;
+        }
+        match self.income_weights(Month::of(e.date)) {
+            None => halves(e.amount),
+            Some([wa, _]) => {
+                let a = (e.amount as f64 * wa).round() as Cents;
+                [a, e.amount - a]
+            }
+        }
+    }
+
     /// Parte da despesa que pesa no orçamento de quem usa o app.
     pub fn my_part(&self, e: &Entry, mode: Mode) -> Cents {
         match (mode, e.shared) {
-            (Mode::Couple, true) => halves(e.amount)[self.me.idx()],
+            (Mode::Couple, true) => self.shared_split(e)[self.me.idx()],
             _ if e.owner == self.me => e.amount,
             _ => 0,
         }
@@ -500,7 +584,7 @@ impl Data {
                 s.shared_total += e.amount;
                 s.shared_part += part;
                 s.paid_by[e.owner.idx()] += e.amount;
-                for (o, h) in s.owed.iter_mut().zip(halves(e.amount)) {
+                for (o, h) in s.owed.iter_mut().zip(self.shared_split(e)) {
                     *o += h;
                 }
             } else {
@@ -571,13 +655,13 @@ impl Data {
     }
 
     /// Saldo entre o casal acumulado até o fim de `m`: em cada despesa compartilhada, quem pagou
-    /// adianta a metade do outro (`halves`); cada acerto abate o que quem pagou devia.
-    /// > 0: B deve a A; < 0: A deve a B.
+    /// adianta a parte do outro (`shared_split`); cada acerto abate o que quem pagou devia.
+    /// Com o rateio desligado, tudo fica zerado. > 0: B deve a A; < 0: A deve a B.
     // ponytail: soma desde o primeiro lançamento a cada quadro; guardar por mês se ficar lento.
     pub fn house_balance(&self, m: Month) -> Cents {
         let shared = self.entries.iter().filter(|e| e.shared && e.kind == Kind::Expense && Month::of(e.date) <= m).map(|e| match e.owner {
-            Person::A => halves(e.amount)[1],
-            Person::B => -halves(e.amount)[0],
+            Person::A => self.shared_split(e)[1],
+            Person::B => -self.shared_split(e)[0],
         });
         let settled = self.settlements.iter().filter(|s| Month::of(s.date) <= m).map(|s| match s.from {
             Person::A => s.amount,
@@ -644,10 +728,49 @@ impl Data {
         out
     }
 
+    /// Contas fixas (`recurring`) lançadas até o fim de `m`, agrupadas por descrição, tipo,
+    /// dono e compartilhamento. Cartões ficam de fora: o pagamento delas é a fatura, e a
+    /// previsão duplicaria as compras. A estimativa usa as últimas 3 ocorrências.
+    pub fn recurring_defs(&self, m: Month, only: Option<Person>) -> Vec<Recurring> {
+        let mut out: Vec<(String, Kind, Person, bool, Vec<(Date, Cents)>)> = Vec::new();
+        for e in self.entries.iter().filter(|e| {
+            e.recurring && e.card.is_none() && e.connected.is_none() && Month::of(e.date) <= m
+                && only.is_none_or(|p| e.owner == p)
+        }) {
+            match out.iter_mut().find(|(d, k, o, s, _)| *d == e.desc && *k == e.kind && *o == e.owner && *s == e.shared) {
+                Some((_, _, _, _, vals)) => vals.push((e.date, e.amount)),
+                None => out.push((e.desc.clone(), e.kind, e.owner, e.shared, vec![(e.date, e.amount)])),
+            }
+        }
+        let mut defs: Vec<Recurring> = out.into_iter().map(|(desc, kind, owner, shared, mut vals)| {
+            vals.sort_by_key(|(d, _)| *d);
+            let recent: Vec<Cents> = vals.iter().rev().take(3).map(|(_, v)| *v).collect();
+            let samples = recent.len();
+            let (min, max) = (recent.iter().min().copied().unwrap_or(0), recent.iter().max().copied().unwrap_or(0));
+            let estimate = recent.iter().sum::<Cents>() / samples.max(1) as Cents;
+            Recurring { desc, kind, category: Category::Other, owner, shared, day: vals.last().map(|(d, _)| d.d).unwrap_or(1), estimate, min, max, samples }
+        }).collect();
+        // A categoria vem da ocorrência mais recente (a estimativa é o mês que vem dela).
+        for def in &mut defs {
+            if let Some(e) = self.entries.iter().filter(|e| e.recurring && e.desc == def.desc && e.kind == def.kind && e.owner == def.owner && e.shared == def.shared && e.card.is_none() && e.connected.is_none()).max_by_key(|e| e.date) {
+                def.category = e.category;
+            }
+        }
+        defs.sort_by_key(|d| (d.day, std::cmp::Reverse(d.estimate)));
+        defs
+    }
+
+    /// Previsão para o mês `m`: as contas fixas que ainda não têm lançamento nele.
+    /// Na ordem do vencimento típico.
+    pub fn forecast(&self, m: Month, only: Option<Person>) -> Vec<Recurring> {
+        self.recurring_defs(m, only).into_iter().filter(|d| {
+            !self.in_month(m).any(|e| e.desc == d.desc && e.kind == d.kind && e.owner == d.owner && e.shared == d.shared)
+        }).collect()
+    }
+
     pub fn entry(&self, id: u32) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)
     }
-
     pub fn toggle(&mut self, b: BillRef, m: Month) {
         match b {
             BillRef::Entry(id) => {
@@ -694,6 +817,7 @@ impl Data {
             reserve_goal: 0,
             reserve_name: String::new(),
             settlements: vec![],
+            shared_split_off: false,
             next_id: 1 << 31,
         }
     }
@@ -739,11 +863,18 @@ impl Data {
                 let date = m.day(day);
                 // Passado pago; no mês atual só até o dia 6 (o plano de saúde do dia 8 fica vencido).
                 let paid = m < Month::of(DEMO_TODAY) || (m == Month::of(DEMO_TODAY) && day <= 6);
-                d.upsert(Entry { id: 0, desc: desc.into(), amount, date, kind, category, owner, shared, card, connected: None, imported: false, paid });
+                // Contas fixas de moradia, utilidades, saúde e reserva alimentam a previsão dos meses futuros.
+                let recurring = card.is_none() && kind == Kind::Expense && matches!(category, C::Housing | C::Utilities | C::Health | C::Reserve);
+                d.upsert(Entry { id: 0, desc: desc.into(), amount, date, kind, category, owner, shared, card, connected: None, imported: false, paid, recurring });
             }
             if k < 0 {
                 d.paid_invoices.extend([(0, m), (1, m)]);
             }
+        }
+        // Viagem com os amigos: PIX manual parcelado — parcela 2 de 4 agora, o resto nos meses que vêm.
+        let nov = Month::of(DEMO_TODAY);
+        for (n, m, paid) in [(2, nov, true), (3, nov.add(1), false), (4, nov.add(2), false)] {
+            d.upsert(Entry { id: 0, desc: format!("Viagem com os amigos ({n}/4)"), amount: 120_000, date: m.day(20), kind: Kind::Expense, category: C::Leisure, owner: A, shared: false, card: None, connected: None, imported: false, paid, recurring: false });
         }
         // Dezembro com viagem: mês de saldo negativo.
         let dec = Month::of(DEMO_TODAY).add(1);
@@ -751,7 +882,7 @@ impl Data {
             ("Viagem de fim de ano — passagens e hospedagem em Florianópolis", 680_000, 4, C::Leisure),
             ("Presentes de Natal", 190_000, 18, C::Other),
         ] {
-            d.upsert(Entry { id: 0, desc: desc.into(), amount, date: dec.day(day), kind: Kind::Expense, category: cat, owner: A, shared: false, card: Some(0), connected: None, imported: false, paid: false });
+            d.upsert(Entry { id: 0, desc: desc.into(), amount, date: dec.day(day), kind: Kind::Expense, category: cat, owner: A, shared: false, card: Some(0), connected: None, imported: false, paid: false, recurring: false });
         }
         d
     }
@@ -876,7 +1007,7 @@ mod tests {
     fn settlement_matches_who_paid() {
         let mut d = Data::demo();
         d.entries.clear();
-        let e = |owner, amount| Entry { id: 0, desc: "x".into(), amount, date: NOV.day(1), kind: Kind::Expense, category: Category::Housing, owner, shared: true, card: None, connected: None, imported: false, paid: false };
+        let e = |owner, amount| Entry { id: 0, desc: "x".into(), amount, date: NOV.day(1), kind: Kind::Expense, category: Category::Housing, owner, shared: true, card: None, connected: None, imported: false, paid: false, recurring: false };
         d.upsert(e(Person::A, 100_000));
         d.upsert(e(Person::B, 20_000));
         let s = d.summary(NOV, Mode::Couple);
@@ -888,7 +1019,7 @@ mod tests {
     #[test]
     fn house_balance_is_cumulative_and_counts_settlements_both_ways() {
         let mut d = Data::empty();
-        let e = |owner, amount, m: Month| Entry { id: 0, desc: "x".into(), amount, date: m.day(1), kind: Kind::Expense, category: Category::Housing, owner, shared: true, card: None, connected: None, imported: false, paid: true };
+        let e = |owner, amount, m: Month| Entry { id: 0, desc: "x".into(), amount, date: m.day(1), kind: Kind::Expense, category: Category::Housing, owner, shared: true, card: None, connected: None, imported: false, paid: true, recurring: false };
         let oct = NOV.add(-1);
         // Outubro: Lucas paga 1.000,01 (centavo ímpar fica com A: B deve 500,00).
         d.upsert(e(Person::A, 100_001, oct));
@@ -918,7 +1049,7 @@ mod tests {
         let mut d = Data::empty();
         d.reserve_start = 100_000;
         d.reserve_goal = 1_000_000;
-        let dep = |owner, amount, m: Month, paid| Entry { id: 0, desc: "Reserva".into(), amount, date: m.day(5), kind: Kind::Expense, category: Category::Reserve, owner, shared: false, card: None, connected: None, imported: false, paid };
+        let dep = |owner, amount, m: Month, paid| Entry { id: 0, desc: "Reserva".into(), amount, date: m.day(5), kind: Kind::Expense, category: Category::Reserve, owner, shared: false, card: None, connected: None, imported: false, paid, recurring: false };
         d.upsert(dep(Person::A, 30_000, NOV.add(-2), true));
         d.upsert(dep(Person::B, 60_000, NOV.add(-1), true));
         d.upsert(dep(Person::A, 0, NOV, true));
@@ -990,7 +1121,7 @@ mod tests {
     fn connected_card_purchases_are_expenses_but_not_bills() {
         let mut d = Data::demo();
         let before = d.summary(NOV, Mode::Individual);
-        let buy = Entry { id: 0, desc: "Mercado (1/3)".into(), amount: 30_000, date: NOV.day(4), kind: Kind::Expense, category: Category::Groceries, owner: d.me, shared: false, card: None, connected: Some("c".into()), imported: true, paid: true };
+        let buy = Entry { id: 0, desc: "Mercado (1/3)".into(), amount: 30_000, date: NOV.day(4), kind: Kind::Expense, category: Category::Groceries, owner: d.me, shared: false, card: None, connected: Some("c".into()), imported: true, paid: true, recurring: false };
         let id = d.upsert(buy);
         let s = d.summary(NOV, Mode::Individual);
         assert_eq!(s.expenses, before.expenses + 30_000);
@@ -1006,7 +1137,7 @@ mod tests {
     fn copy_previous_month_brings_manual_entries_once() {
         let mut d = Data::demo();
         let dec = NOV.add(1);
-        let bank = Entry { id: 0, desc: "PIX".into(), amount: 5_000, date: NOV.day(31), kind: Kind::Expense, category: Category::Other, owner: Person::A, shared: false, card: None, connected: None, imported: true, paid: true };
+        let bank = Entry { id: 0, desc: "PIX".into(), amount: 5_000, date: NOV.day(31), kind: Kind::Expense, category: Category::Other, owner: Person::A, shared: false, card: None, connected: None, imported: true, paid: true, recurring: false };
         d.upsert(bank.clone());
         d.upsert(Entry { connected: Some("c".into()), desc: "Loja".into(), ..bank });
         let manual: Vec<Entry> = d.in_month(NOV).filter(|e| Origin::of(e) == Origin::Manual).cloned().collect();
@@ -1025,7 +1156,7 @@ mod tests {
         assert!(!mine.is_empty() && mine.iter().all(|id| d.entry(*id).unwrap().owner == Person::B));
         // Dia 31 vira o último dia do mês seguinte.
         let mut d = Data::empty();
-        d.upsert(Entry { id: 0, desc: "Aluguel".into(), amount: 1, date: Month { y: 2027, m: 1 }.day(31), kind: Kind::Expense, category: Category::Housing, owner: Person::A, shared: true, card: None, connected: None, imported: false, paid: true });
+        d.upsert(Entry { id: 0, desc: "Aluguel".into(), amount: 1, date: Month { y: 2027, m: 1 }.day(31), kind: Kind::Expense, category: Category::Housing, owner: Person::A, shared: true, card: None, connected: None, imported: false, paid: true, recurring: false });
         let id = d.copy_previous(Month { y: 2027, m: 2 }, None)[0];
         assert_eq!(d.entry(id).unwrap().date, Date { y: 2027, m: 2, d: 28 });
     }
@@ -1038,7 +1169,7 @@ mod tests {
         assert_eq!(split_installment("Loja 5/3"), None);
         assert_eq!(split_installment("Mercado"), None);
         let mut d = Data::empty();
-        let e = |desc: &str, amount, date| Entry { id: 0, desc: desc.into(), amount, date, kind: Kind::Expense, category: Category::Shopping, owner: Person::A, shared: false, card: None, connected: Some("c".into()), imported: true, paid: true };
+        let e = |desc: &str, amount, date| Entry { id: 0, desc: desc.into(), amount, date, kind: Kind::Expense, category: Category::Shopping, owner: Person::A, shared: false, card: None, connected: Some("c".into()), imported: true, paid: true, recurring: false };
         d.upsert(e("TV (1/3)", 10_000, NOV.add(-1).day(5)));
         d.upsert(e("TV (2/3)", 10_000, NOV.day(5)));
         d.upsert(e("Sofá 1/2", 5_000, NOV.add(-6).day(5)));
@@ -1059,7 +1190,7 @@ mod tests {
         let s = d.summary(NOV, Mode::Couple);
         assert!(s.overdue_count >= 1 && s.paid_count >= 1);
         assert!(d.summary(NOV.add(1), Mode::Couple).balance < 0);
-        assert!(d.summary(NOV.add(2), Mode::Couple).empty);
+        assert!(d.summary(NOV.add(3), Mode::Couple).empty);
         // Pagar atualiza resumo e reserva.
         let res = s.reserve;
         let id = d.in_month(NOV).find(|e| e.category == Category::Reserve).unwrap().id;
@@ -1069,5 +1200,78 @@ mod tests {
         assert_eq!(s2.reserve, res - 150_000);
         d.toggle(BillRef::Invoice(0), NOV);
         assert_eq!(d.summary(NOV, Mode::Couple).paid_count, s.paid_count);
+    }
+
+    #[test]
+    fn shared_expenses_follow_the_income_share() {
+        let mut d = Data::empty();
+        let inc = |owner, amount, m: Month| Entry { id: 0, desc: "Salário".into(), amount, date: m.day(5), kind: Kind::Income, category: Category::Salary, owner, shared: false, card: None, connected: None, imported: false, paid: true, recurring: false };
+        let rent = |amount| Entry { id: 0, desc: "Aluguel".into(), amount, date: NOV.day(10), kind: Kind::Expense, category: Category::Housing, owner: Person::A, shared: true, card: None, connected: None, imported: false, paid: true, recurring: false };
+        // Renda 90/10 nos três meses: o aluguel de 1.000 divide 900/100, sem perder centavo.
+        for m in [NOV.add(-2), NOV.add(-1), NOV] {
+            d.upsert(inc(Person::A, 3_000_000, m));
+            d.upsert(inc(Person::B, 333_333, m));
+        }
+        let id = d.upsert(rent(1_000_000));
+        let e = d.entry(id).unwrap().clone();
+        let split = d.shared_split(&e);
+        assert_eq!(split.iter().sum::<Cents>(), 1_000_000);
+        assert_eq!(split, [900_000, 100_000]);
+        let s = d.summary(NOV, Mode::Couple);
+        assert_eq!(s.owed, split);
+        // Quem pagou tudo adiantou só a parte do outro: Marina deve 100 a Lucas.
+        assert_eq!(d.house_balance(NOV), 100_000);
+        assert_eq!(s.settlement, 100_000);
+        // Marina (10%) custa 100 para o orçamento dela; Lucas, o resto.
+        assert_eq!(d.my_part(&e, Mode::Couple), 900_000);
+        d.me = Person::B;
+        assert_eq!(d.my_part(&e, Mode::Couple), 100_000);
+        // Rateio desligado: a despesa é de quem pagou, o saldo entre eles zera.
+        d.me = Person::A;
+        d.shared_split_off = true;
+        assert_eq!(d.shared_split(&e), [1_000_000, 0]);
+        assert_eq!(d.my_part(&e, Mode::Couple), 1_000_000);
+        assert_eq!(d.summary(NOV, Mode::Couple).settlement, 0);
+        assert_eq!(d.house_balance(NOV), 0);
+        d.shared_split_off = false;
+        // Sem renda registrada: volta a metade para cada um.
+        let mut none = Data::empty();
+        none.upsert(rent(101));
+        assert_eq!(none.shared_split(none.entry(1 << 31).unwrap()), [51, 50]);
+        // A divisão usa a renda do mês da despesa: aluguel antigo segue o rateio de antes.
+        d.upsert(Entry { date: NOV.add(-4).day(10), ..rent(1_000_000) });
+        let old = d.entries.iter().find(|e| Month::of(e.date) == NOV.add(-4)).unwrap().clone();
+        assert_eq!(d.shared_split(&old), halves(1_000_000), "sem renda na janela de 3 meses, é metade");
+    }
+
+    #[test]
+    fn recurring_forecast_estimates_the_months_ahead() {
+        let mut d = Data::empty();
+        let luz = |amount, m: Month| Entry { id: 0, desc: "Luz".into(), amount, date: m.day(15), kind: Kind::Expense, category: Category::Utilities, owner: Person::A, shared: true, card: None, connected: None, imported: false, paid: true, recurring: true };
+        d.upsert(luz(10_000, NOV.add(-2)));
+        d.upsert(luz(12_000, NOV.add(-1)));
+        d.upsert(luz(11_000, NOV));
+        let defs = d.recurring_defs(NOV, None);
+        assert_eq!(defs.len(), 1);
+        let def = &defs[0];
+        assert_eq!((def.estimate, def.min, def.max, def.day, def.samples, def.category), (11_000, 10_000, 12_000, 15, 3, Category::Utilities));
+        assert_eq!(def.range(), "entre R$ 100,00 e R$ 120,00");
+        // Novembro já tem a conta; dezembro não: é ela que aparece na previsão.
+        assert!(d.forecast(NOV, None).is_empty());
+        assert_eq!(d.forecast(NOV.add(1), None)[0].estimate, 11_000);
+        // A previsão de quem é só de quem usa o app no modo individual.
+        assert!(d.forecast(NOV.add(1), Some(Person::B)).is_empty());
+        // Lançado o previsto, sai da lista e nasce marcado como recorrente.
+        let id = d.upsert(def.entry(NOV.add(1)));
+        let made = d.entry(id).unwrap();
+        assert!(made.recurring && made.amount == def.estimate && made.date == NOV.add(1).day(15) && !made.paid);
+        assert!(d.forecast(NOV.add(1), None).is_empty());
+        // Compra no cartão não vira previsão: o pagamento dela é a fatura.
+        d.upsert(Entry { card: Some(0), recurring: true, desc: "Streaming".into(), ..luz(5_000, NOV) });
+        assert!(!d.recurring_defs(NOV, None).iter().any(|f| f.desc == "Streaming"));
+        // O dia cai no fim do mês quando o típico não existe nele (31/01 → 28/02).
+        let mut d = Data::empty();
+        d.upsert(Entry { id: 0, desc: "Aluguel".into(), amount: 500_000, date: Month { y: 2027, m: 1 }.day(31), kind: Kind::Expense, category: Category::Housing, owner: Person::A, shared: false, card: None, connected: None, imported: false, paid: true, recurring: true });
+        assert_eq!(d.forecast(Month { y: 2027, m: 2 }, None)[0].entry(Month { y: 2027, m: 2 }).date, Date { y: 2027, m: 2, d: 28 });
     }
 }

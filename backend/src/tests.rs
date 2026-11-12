@@ -219,6 +219,9 @@ async fn setup_with(
         bind: "127.0.0.1:3001".parse().unwrap(),
         database,
         institutions,
+        zai_token: None,
+        zai_base: "https://api.z.ai/api/paas/v4".into(),
+        zai_model: "glm-5.3".into(),
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     (api, state, upstream)
@@ -424,6 +427,9 @@ async fn local_server_reports_missing_credentials_without_using_fake_upstream_da
         bind: "127.0.0.1:3001".parse().unwrap(),
         database: unused_database(),
         institutions: None,
+        zai_token: None,
+        zai_base: "https://api.z.ai/api/paas/v4".into(),
+        zai_model: "glm-5.3".into(),
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     let http = reqwest::Client::new();
@@ -435,7 +441,9 @@ async fn local_server_reports_missing_credentials_without_using_fake_upstream_da
         .json::<Value>()
         .await
         .unwrap();
-    assert_eq!(health, json!({"status": "ok", "pluggyConfigured": false}));
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["pluggyConfigured"], false);
+    assert_eq!(health["assistant"], false, "sem ZAI_TOKEN, o assistente fica desligado");
     let response = http
         .post(format!("{}/api/connect-token", api.url))
         .bearer_auth(TOKEN_1)
@@ -1053,6 +1061,176 @@ async fn settlements_reserve_members_and_institution_stay_in_the_household() {
             .unwrap()
             .get(0);
         assert_eq!(foreign, None);
+    })
+    .await;
+}
+
+// ───────────────────────── Ajustes, contas fixas e assistente ─────────────────────────
+
+#[tokio::test]
+async fn settings_are_household_wide_and_recurring_entries_survive_the_round_trip() {
+    with_database(|database, _db| async move {
+        let (api, _state, _upstream) = setup_with(database, None).await;
+        let http = reqwest::Client::new();
+        // Conta fixa: grava e volta na leitura, para os dois membros.
+        let body = json!({"description": "Aluguel", "amount_cents": 100000, "date": "2026-11-10", "kind": "expense",
+            "category": "housing", "shared": true, "owner": 0, "paid": false, "recurring": true});
+        let created: api::Entry = send(http.post(format!("{}/api/entries", api.url)), TOKEN_1, body.clone())
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(created.recurring);
+        assert_eq!(api_state(&api, TOKEN_2).await.entries[0].recurring, true);
+        // Editar para não recorrente também funciona.
+        let mut edited = created.clone();
+        edited.recurring = false;
+        let response = send(http.put(format!("{}/api/entries/{}", api.url, edited.id)), TOKEN_2, serde_json::to_value(&edited).unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.json::<api::Entry>().await.unwrap().recurring);
+
+        // O interruptor do rateio vale para o domicílio inteiro, por qualquer membro.
+        let response = send(http.put(format!("{}/api/settings", api.url)), TOKEN_1, json!({"shared_split_off": true})).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(api_state(&api, TOKEN_2).await.shared_split_off);
+        let response = send(http.put(format!("{}/api/settings", api.url)), TOKEN_2, json!({"shared_split_off": false})).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!api_state(&api, TOKEN_1).await.shared_split_off);
+        let response = send(http.put(format!("{}/api/settings", api.url)), TOKEN_1, json!({"shared_split_off": true})).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    })
+    .await;
+}
+
+/// Z.ai falso: devolve sempre a mesma resposta e conta as chamadas (para provar que nada é
+/// regerado sem mudança nos dados).
+async fn setup_with_zai(database: tokio_postgres::Config, calls: Arc<AtomicUsize>) -> (Running, Running, Running) {
+    let zai = spawn(Router::new().fallback(move |headers: axum::http::HeaderMap, body: String| {
+        let calls = calls.clone();
+        async move {
+            assert_eq!(
+                headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer zai-test-token"),
+                "o token do GLM vai só ao Z.ai"
+            );
+            let body: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["model"], "glm-5.3");
+            assert!(body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "system"));
+            calls.fetch_add(1, Ordering::SeqCst);
+            Json(json!({"choices": [{"message": {"role": "assistant", "content": "Análise falsa 🐠 Tudo nadando bem!"}}]})).into_response()
+        }
+    }))
+    .await;
+    let state = Arc::new(Mock::default());
+    let upstream = spawn(Router::new().fallback(mock).with_state(state.clone())).await;
+    let config = Config {
+        client_id: "test-id".into(),
+        client_secret: "test-secret".into(),
+        tokens: [TOKEN_1.into(), TOKEN_2.into()],
+        bind: "127.0.0.1:3001".parse().unwrap(),
+        database,
+        institutions: None,
+        zai_token: Some("zai-test-token".into()),
+        zai_base: zai.url.clone(),
+        zai_model: "glm-5.3".into(),
+    };
+    let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
+    (api, upstream, zai)
+}
+
+async fn reports_of(api: &Running, token: &str) -> api::AssistantReports {
+    reqwest::Client::new()
+        .get(format!("{}/api/assistant/reports", api.url))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn assistant_keeps_reports_private_generates_once_and_chats_with_the_mock_glm() {
+    with_database(|database, _db| async move {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (api, _upstream, _zai) = setup_with_zai(database, calls.clone()).await;
+        let http = reqwest::Client::new();
+        let reports = reports_of(&api, TOKEN_1).await;
+        assert!(reports.enabled && reports.reports.is_empty() && !reports.busy);
+
+        // "Analisar agora": responde na hora e gera em segundo plano.
+        let response = http
+            .post(format!("{}/api/assistant/refresh", api.url))
+            .bearer_auth(TOKEN_1)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let mut reports = None;
+        for _ in 0..200 {
+            let r = reports_of(&api, TOKEN_1).await;
+            if r.reports.len() == 2 && !r.busy {
+                reports = Some(r);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let reports = reports.expect("as análises de Felipe e do casal chegaram");
+        let mut subjects: Vec<u8> = reports.reports.iter().map(|r| r.subject).collect();
+        subjects.sort_unstable();
+        assert_eq!(subjects, [0, 2], "Felipe vê a própria e a do casal, nunca a de Larissa");
+        assert!(reports.reports.iter().all(|r| r.content.contains("Análise falsa")));
+        let mut subjects: Vec<u8> = reports_of(&api, TOKEN_2).await.reports.iter().map(|r| r.subject).collect();
+        subjects.sort_unstable();
+        assert_eq!(subjects, [1, 2], "Larissa vê a própria e a do casal, nunca a de Felipe");
+        let couple = reports.reports.iter().find(|r| r.subject == 2).unwrap();
+        assert_eq!((couple.period_start.len(), couple.period_end.len()), (10, 10));
+        assert!(couple.generated_at.contains('T') && couple.generated_at.ends_with('Z'), "geração em ISO UTC: {}", couple.generated_at);
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "uma chamada ao GLM por análise");
+
+        // Sem mudança nos dados, "Analisar de novo" reaproveita as três.
+        let response = http
+            .post(format!("{}/api/assistant/refresh", api.url))
+            .bearer_auth(TOKEN_2)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) == 3 && !reports_of(&api, TOKEN_1).await.busy {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "dados iguais: nenhuma chamada nova ao GLM");
+
+        // Conversa: o contexto vai ao modelo e a resposta volta ao membro.
+        let reply: api::ChatReply = send(
+            http.post(format!("{}/api/assistant/chat", api.url)),
+            TOKEN_1,
+            json!({"messages": [
+                {"role": "user", "content": "Como estou?"},
+                {"role": "assistant", "content": "Bem!"},
+                {"role": "user", "content": "E o casal?"}
+            ]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert!(reply.content.contains("Análise falsa"));
+        assert!(calls.load(Ordering::SeqCst) >= 4);
+        // Histórico que não termina com mensagem do usuário: erro claro, sem chamar o GLM.
+        let before = calls.load(Ordering::SeqCst);
+        let response = send(
+            http.post(format!("{}/api/assistant/chat", api.url)),
+            TOKEN_1,
+            json!({"messages": [{"role": "assistant", "content": "oi"}]}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(Ordering::SeqCst), before);
     })
     .await;
 }
