@@ -123,11 +123,12 @@ Em `/opt/docker/finance` no servidor (`ssh servidor`), com o código do reposit�
 
 - `.env` (600): `POSTGRES_PASSWORD` próprio do servidor e `POSTGRES_PORT=5433` (só loopback).
 - `backend/.env` (600): `CLIENT_ID`, `CLIENT_SECRET`, `APP_TOKEN_1`, `APP_TOKEN_2` (os mesmos do
-  desktop), `DATABASE_URL=host=127.0.0.1 port=5433 …` e `BIND_ADDR=<IP Tailscale do servidor>:3021`.
+  desktop), `DATABASE_URL=host=127.0.0.1 port=5433 …` e `BIND_ADDR=127.0.0.1:3021`.
 - `docker compose --profile server up -d --build`: PostgreSQL e backend. O backend usa a rede do
-  host e escuta só no IP Tailscale, sem exposição à internet nem à rede local.
+  host e escuta só no loopback; o acesso externo é pelo túnel da Cloudflare (`cloudflared`, também
+  na rede do host), com o hostname público apontando para `http://localhost:3021`.
 
-No desktop, `FLOUNDER_BACKEND_URL=http://<IP Tailscale>:3021` no `backend/.env` local aponta o app
+No desktop, `FLOUNDER_BACKEND_URL=https://<hostname do túnel>` no `backend/.env` local aponta o app
 para o servidor (os tokens continuam sendo lidos desse arquivo).
 
 Atualizar: enviar o código novo (`git archive HEAD | ssh servidor tar -x -C /opt/docker/finance`)

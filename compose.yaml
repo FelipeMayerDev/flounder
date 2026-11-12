@@ -23,8 +23,8 @@ services:
     stop_grace_period: 30s
 
   # Só no servidor: docker compose --profile server up -d --build
-  # Rede do host para escutar só no IP Tailscale (BIND_ADDR em backend/.env); se o Tailscale
-  # ainda não subiu, o processo sai e o Docker tenta de novo.
+  # Rede do host, escutando só em 127.0.0.1 (BIND_ADDR em backend/.env): o acesso de fora é
+  # pelo túnel da Cloudflare (cloudflared também na rede do host → http://localhost:3021).
   backend:
     profiles: [server]
     build:
