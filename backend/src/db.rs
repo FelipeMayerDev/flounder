@@ -3,7 +3,7 @@ use crate::connected::{ConnectedBill, ConnectedCard, cents, identify, iso_date};
 use tokio::sync::{MappedMutexGuard, MutexGuard};
 use tokio_postgres::{Client, NoTls, Row};
 
-const MIGRATIONS: [(i32, &str); 4] = [
+const MIGRATIONS: [(i32, &str); 5] = [
     (1, include_str!("../migrations/001_initial.sql")),
     (
         2,
@@ -11,6 +11,7 @@ const MIGRATIONS: [(i32, &str); 4] = [
     ),
     (3, include_str!("../migrations/003_sync_and_settlements.sql")),
     (4, include_str!("../migrations/004_more_categories.sql")),
+    (5, include_str!("../migrations/005_past_invoices_paid.sql")),
 ];
 const HOUSEHOLD: &str = "(SELECT household_id FROM members WHERE client_user_id = $1)";
 const ENTRY: &str = "e.id::text, e.description, e.amount_cents, to_char(e.entry_date, 'YYYY-MM-DD'), \
@@ -343,8 +344,11 @@ impl Backend {
                         .find(|b| b["dueDate"].as_str().and_then(iso_date) == Some(bill.due.as_str()))
                         .and_then(|b| b["id"].as_str());
                     tx.execute(
-                        "INSERT INTO card_invoices(household_id, card_id, due_date, currency, total_cents, source, external_id)
-                         VALUES ($1::text::uuid, $2::text::uuid, $3::text::date, $4, $5, 'pluggy', $6)
+                        // Fatura nova de mês anterior (cartão recém-conectado) já foi paga fora do app;
+                        // depois disso, "paga" é do usuário e a reimportação não mexe.
+                        "INSERT INTO card_invoices(household_id, card_id, due_date, currency, total_cents, source, external_id, paid)
+                         VALUES ($1::text::uuid, $2::text::uuid, $3::text::date, $4, $5, 'pluggy', $6,
+                             $3::text::date < date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo')::date)
                          ON CONFLICT (card_id, due_date, currency) DO UPDATE SET total_cents = EXCLUDED.total_cents,
                              source = 'pluggy', external_id = EXCLUDED.external_id",
                         &[&home, &id, &bill.due, &currency, &bill.total, &bill_id],

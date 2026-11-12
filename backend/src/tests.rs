@@ -17,6 +17,8 @@ struct Mock {
     extra_card: AtomicBool,
     /// Inclui uma compra pendente no cartão.
     pending: AtomicBool,
+    /// Inclui uma fatura antiga (de mês anterior) em `/bills`.
+    old_bill: AtomicBool,
     options: Mutex<Vec<Value>>,
 }
 
@@ -112,7 +114,11 @@ async fn mock(State(state): State<Arc<Mock>>, request: Request) -> Response {
         "/bills" => {
             let mut bill = bill();
             bill["id"] = json!(format!("bill-{}", query["accountId"]));
-            json!({"results": [bill], "page": query["page"], "pageSize": query["pageSize"]})
+            let mut results = vec![bill];
+            if state.old_bill.load(Ordering::SeqCst) {
+                results.insert(0, json!({"id": format!("old-{}", query["accountId"]), "dueDate":"2020-01-25","totalAmount": 99.0,"totalAmountCurrencyCode":"BRL"}));
+            }
+            json!({"results": results, "page": query["page"], "pageSize": query["pageSize"]})
         }
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -187,7 +193,7 @@ fn transactions(account: &str, after: Option<&str>, pending: bool) -> Value {
 }
 
 fn bill() -> Value {
-    json!({"dueDate":"2026-11-25","totalAmount": 123.45,"totalAmountCurrencyCode":"BRL"})
+    json!({"dueDate":"2099-11-25","totalAmount": 123.45,"totalAmountCurrencyCode":"BRL"})
 }
 
 fn unused_database() -> tokio_postgres::Config {
@@ -613,6 +619,21 @@ async fn card_import_persists_per_owner_replaces_on_reload_and_never_reassigns_i
         assert_eq!(load("item-one", TOKEN_1).await, StatusCode::OK);
         let cards = api_state(&api, TOKEN_1).await.cards;
         assert!(cards[0].bills[0].paid && !cards[1].bills[0].paid);
+
+        // Fatura de mês anterior que aparece pela primeira vez (cartão recém-conectado) já vem paga;
+        // a futura não. Desmarcada pelo usuário, a reimportação não volta a marcar.
+        state.old_bill.store(true, Ordering::SeqCst);
+        assert_eq!(load("item-three", TOKEN_1).await, StatusCode::OK);
+        let bills = |cards: Vec<connected::ConnectedCard>| -> Vec<(String, bool)> {
+            cards.into_iter().find(|c| c.item_id == "item-three").unwrap().bills.into_iter().map(|b| (b.due, b.paid)).collect()
+        };
+        let got = bills(api_state(&api, TOKEN_1).await.cards);
+        assert_eq!(got, [("2020-01-25".to_owned(), true), ("2099-11-25".to_owned(), false)]);
+        db.execute("UPDATE card_invoices SET paid = false WHERE due_date = '2020-01-25'", &[]).await.unwrap();
+        assert_eq!(load("item-three", TOKEN_1).await, StatusCode::OK);
+        assert!(!bills(api_state(&api, TOKEN_1).await.cards)[0].1);
+        state.old_bill.store(false, Ordering::SeqCst);
+        assert_eq!(load("item-three", TOKEN_1).await, StatusCode::OK);
 
         // Item já gravado para outro membro: recusado, sem reatribuir nem gravar cartões.
         db.execute(
