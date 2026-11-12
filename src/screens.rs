@@ -31,6 +31,13 @@ impl Flow {
     }
 }
 
+/// Tooltip do botão "Atualizar contas": o caminho da compra até o app e como adiantar.
+pub(crate) const SYNC_TIP: &str = "Reimporta bancos e cartões da Pluggy (pode levar até um minuto).\n\
+Compras novas do cartão chegam quando a Pluggy atualiza: o Meu Pluggy refresca sozinho a cada 24 h \
+(limite do Open Finance por banco) e o backend reimporta a cada 6 h.\n\
+Para adiantar: atualize a conexão no Meu Pluggy (meu.pluggy.ai) e depois clique aqui.\n\
+Sem novidade em 24–48 h? Veja status.pluggy.ai ou refaça o compartilhamento no app do banco.";
+
 const WEEKDAYS: [&str; 7] = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 
 fn day_title(d: Date) -> String {
@@ -1106,7 +1113,7 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
                 let label = if r.syncing { format!("{} Atualizando…", icon::HOURGLASS) } else { format!("{} Atualizar contas", icon::ARROWS_CLOCKWISE) };
                 let b = ui.add_enabled(!r.syncing, egui::Button::new(label).min_size(vec2(0.0, 36.0)));
                 b.widget_info(|| WidgetInfo::labeled(WidgetType::Button, !r.syncing, if r.syncing { "Atualizando contas" } else { "Atualizar contas" }));
-                refresh = b.clicked();
+                refresh = b.on_hover_text(SYNC_TIP).clicked();
                 if let Some((note, failed)) = &r.sync_note {
                     w::text(ui, note.as_str(), w::regular(13.0), if *failed { colors.red } else { colors.muted });
                 }
