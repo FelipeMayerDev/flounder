@@ -60,7 +60,7 @@ impl Zai {
             .await
             .map_err(|_| ai_down())?
             .error_for_status()
-            .map_err(|_| ai_down())?
+            .map_err(|err| ai_status(err.status()))?
             .json()
             .await
             .map_err(|_| ai_down())?;
@@ -77,6 +77,21 @@ fn ai_down() -> ApiError {
         StatusCode::BAD_GATEWAY,
         "O assistente (Z.ai) não respondeu. Tente de novo em instantes.",
     )
+}
+
+/// Erros do Z.ai com causa clara: token de outro plano, saldo/limite esgotado, etc.
+fn ai_status(status: Option<StatusCode>) -> ApiError {
+    match status {
+        Some(StatusCode::UNAUTHORIZED) | Some(StatusCode::FORBIDDEN) => ApiError(
+            StatusCode::BAD_GATEWAY,
+            "O Z.ai recusou o ZAI_TOKEN do backend (chave inválida ou de outro plano).",
+        ),
+        Some(StatusCode::TOO_MANY_REQUESTS) => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "O Z.ai recusou a chamada: sem saldo ou com o limite do plano esgotado.",
+        ),
+        _ => ai_down(),
+    }
 }
 
 fn not_configured() -> ApiError {
