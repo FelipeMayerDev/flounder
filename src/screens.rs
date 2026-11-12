@@ -477,7 +477,8 @@ fn card_section(app: &mut App, card: &ConnectedCard, ui: &mut Ui) {
         }
         w::list(ui, |ui| {
             for e in items {
-                if entry_row(ui, e, None).clicked() {
+                // O dia na linha: compras repetidas (mercado, lanchonete…) ficam reconhecíveis.
+                if entry_row(ui, e, Some(&format!("dia {}", e.date.d))).clicked() {
                     open = Some(e.id);
                 }
             }
