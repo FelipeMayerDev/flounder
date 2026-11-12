@@ -53,7 +53,7 @@ impl Zai {
                 "model": self.model,
                 "messages": body,
                 "temperature": 0.8,
-                "max_tokens": 1200,
+                "max_tokens": 4096,
                 "stream": false,
             }))
             .send()
