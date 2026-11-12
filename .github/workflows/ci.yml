@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependências Linux (Wayland/X11 e Vulkan por software para as capturas)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
+      - run: cargo test --locked
+      - run: cargo test --manifest-path backend/Cargo.toml --locked
+      - run: node --test backend/static/connect.test.cjs
+      - name: Pacote Linux
+        if: runner.os == 'Linux'
+        run: scripts/package-linux.sh
+      - name: Pacote Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $n = "flounder-$v-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$n" | Out-Null
+          Copy-Item target/release/flounder.exe "dist/$n/"
+          Copy-Item docs/EXECUTAR.txt "dist/$n/LEIA-ME.txt"
+          Copy-Item assets/fonts/LICENSE.txt "dist/$n/LICENSE-Inter.txt"
+          Copy-Item assets/art/LICENSE.txt "dist/$n/LICENSE-FluentEmoji.txt"
+          Compress-Archive -Path "dist/$n" -DestinationPath "dist/$n.zip" -Force
+      - name: Capturas (renderização WGPU sem janela)
+        continue-on-error: true
+        run: cargo test --release --locked --test ui -- --ignored screenshots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flounder-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capturas-${{ runner.os }}
+          path: docs/screenshots/*.png
+
+  backend-postgres:
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: flounder
+          POSTGRES_PASSWORD: flounder-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flounder"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Testes do backend com PostgreSQL (bancos descartáveis flounder_test_*)
+        run: cargo test --manifest-path backend/Cargo.toml --locked
+        env:
+          TEST_DATABASE_URL: host=127.0.0.1 port=5432 user=flounder password=flounder-ci dbname=postgres

@@ -1,0 +1,70 @@
+Flounder — protótipo de finanças pessoais e de casal
+
+COMO ABRIR
+  Antes, deixe o backend rodando: backend/run-local.sh (os dados ficam no PostgreSQL dele).
+  Windows: extraia o ZIP e abra flounder.exe.
+  Linux:   tar -xzf flounder-*-linux-x86_64.tar.gz && ./flounder-*/flounder
+
+  Na primeira abertura, o app pergunta "Quem é você?" e mostra os dois nomes do casal.
+  A escolha fica salva; para trocar, use Ajustes → Quem usa este computador.
+  Se o backend não responder, o app explica o problema e oferece "Tentar novamente".
+  O app lê APP_TOKEN_1/APP_TOKEN_2 do backend/.env local (outro caminho:
+  FLOUNDER_BACKEND_ENV) e acessa http://127.0.0.1:3001 (outro endereço:
+  FLOUNDER_BACKEND_URL). Lançamentos novos, edições e "paga" são gravados no backend;
+  o painel recarrega os dados a cada 5 segundos.
+
+  Em Ajustes → Aparência, escolha Claro, Escuro ou Pink. O tema é salvo localmente.
+  O painel inclui calendário de vencimentos e evolução do saldo previsto.
+  Arraste pela alça de pontos no canto superior direito dos cards para mudar sua posição.
+  Arraste o canto inferior direito para mudar largura e altura em passos da grade.
+  O card acompanha o cursor; ao soltar, o painel se reorganiza com animação.
+  O layout é salvo ao fechar.
+  Com a alça em foco (Tab), use as setas para mover ou redimensionar.
+
+  Cartão ou banco novo: conecte-o primeiro em meu.pluggy.ai; depois, em Ajustes (ou na tela
+  Cartões), use "Conectar banco ou cartão" e, na página que abrir, "Autorizar Meu Pluggy",
+  escolhendo a conexão nova. Por fim, "Atualizar contas". O card de cartões
+  mostra os cartões dos dois no modo Casal e só os seus no modo Individual.
+  Clique no cartão para ver limites e faturas. As credenciais Pluggy ficam só no backend.
+  As transações dos bancos e cartões conectados viram lançamentos sozinhas; o botão
+  "Atualizar contas" no menu reimporta tudo (roda também uma vez ao abrir o app).
+  Fluxo de caixa: lançamentos do mês por dia, com filtros, busca, totais, saldo em conta e
+  "Copiar do mês anterior" (traz os lançamentos manuais do mês anterior, ainda não pagos).
+  Cartões: limites, faturas (marque como paga), compras do mês de cada cartão e
+  "Parcelas em andamento" (parcela atual, quantas faltam, valor restante e quanto já está
+  comprometido em cada um dos próximos 6 meses).
+  Para excluir um lançamento, abra-o e use "Excluir" (pede confirmação).
+  Nossa casa: despesas da casa do mês, quem pagou, a metade de cada um e o saldo entre
+  vocês acumulado até o mês (já com os acertos). "Registrar acerto" grava a transferência
+  que zera o saldo; acertos podem ser excluídos. No modo Individual vira "Meu orçamento".
+  Reserva: meta, progresso, aportes dos últimos 12 meses e em quantos meses a meta chega
+  no ritmo atual. "Editar meta" muda nome, valor e saldo inicial.
+  Ajustes: nomes do casal, contas conectadas (escolha o banco de cada conexão) e como
+  conectar novas contas (página /connect, cada pessoa com o próprio acesso).
+  "Hoje" é a data atual de São Paulo.
+
+REQUISITOS
+  Arquitetura x86-64.
+  Windows 10 ou 11 com driver de vídeo com DirectX 12 ou Vulkan.
+  Linux com glibc 2.35 ou mais nova (Ubuntu 22.04+, Fedora 36+, Debian 12+),
+    sessão Wayland ou X11, e driver Vulkan ou OpenGL ES 3 (Mesa serve).
+    Bibliotecas carregadas em tempo de execução: libxkbcommon, libwayland-client
+    (Wayland) ou libX11/libXcursor/libXi/libXrandr (X11).
+  Para forçar X11 numa sessão Wayland: WAYLAND_DISPLAY= ./flounder
+
+ATALHOS
+  Alt+← / Alt+→     mês anterior / próximo
+  Ctrl+N            novo lançamento
+  Tab / Shift+Tab   percorre os controles; Enter ou Espaço ativa
+  Esc               fecha janelas de edição
+
+MOVIMENTO
+  Cartões entram em cascata, valores contam até o número final, barras crescem e
+  a seleção desliza. Para desligar: FLOUNDER_REDUCED_MOTION=1
+  (Windows: set FLOUNDER_REDUCED_MOTION=1 && flounder.exe)
+
+MODOS
+  "Individual" troca o rateio da casa pela distribuição do orçamento pessoal.
+
+Fonte Inter (licença SIL OFL 1.1, ver LICENSE-Inter.txt). Ícones Phosphor (MIT).
+Ilustrações 3D: Microsoft Fluent Emoji (MIT, ver LICENSE-FluentEmoji.txt).

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Flounder · Conectar cartões</title>
+  <style>
+    :root{color-scheme:light dark;font-family:system-ui,sans-serif;background:#141821;color:#edf1f7}body{max-width:900px;margin:40px auto;padding:0 20px}h1{font-size:28px}h2{font-size:18px}p{line-height:1.5;color:#b9c3d3}.panel{background:#202735;border:1px solid #374359;border-radius:16px;padding:24px;margin:20px 0}label{display:block;margin:12px 0 6px}input,select,button{box-sizing:border-box;font:inherit;border-radius:8px;padding:10px 12px}input,select{width:100%;background:#151b26;color:inherit;border:1px solid #52617b}button{border:0;background:#75a5ff;color:#101927;font-weight:600;margin:14px 8px 0 0;cursor:pointer}button:disabled{opacity:.45;cursor:default}input[type=checkbox]{width:auto;margin-right:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;background:#121822;padding:16px;border-radius:8px;max-height:500px;overflow:auto}#status{padding:12px 16px;border-left:3px solid #75a5ff}small{color:#b9c3d3}a{color:#99bcff}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #b6ceff;outline-offset:3px}
+  </style>
+  <script src="/connect.js" defer></script>
+</head>
+<body>
+  <h1>Conectar cartões</h1>
+  <p>Flounder · conecte seus bancos no Meu Pluggy e autorize aqui a leitura dos seus dados pessoais.</p>
+  <section class="panel">
+    <h2>Primeiro, conecte seus bancos</h2>
+    <p>Entre no <a href="https://meu.pluggy.ai" target="_blank" rel="noopener noreferrer">Meu Pluggy</a>, cadastre-se e autorize suas contas bancárias lá.</p>
+    <p>Depois, use o botão <strong>Autorizar Meu Pluggy</strong> abaixo. Ele abre o conector pessoal MeuPluggy, que permite ler essas conexões pela API.</p>
+    <a href="https://meu.pluggy.ai/api-guide" target="_blank" rel="noopener noreferrer">Guia oficial de uso pessoal</a>
+  </section>
+  <p id="status" role="status" aria-live="polite">Conferindo o backend…</p>
+  <section class="panel">
+    <h2>Acesso do cliente</h2>
+    <label for="token">Token do cliente</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="APP_TOKEN_1 ou APP_TOKEN_2 do arquivo backend/.env">
+    <small>Esse token identifica um dos dois clientes. CLIENT_ID e CLIENT_SECRET ficam somente no backend.</small>
+    <label><input id="sandbox" type="checkbox">Mostrar também bancos de teste (Pluggy Bank)</label>
+    <button id="connect" type="button" disabled>Autorizar Meu Pluggy</button>
+  </section>
+  <section class="panel">
+    <h2>Consultar uma conexão</h2>
+    <label for="item">ID da conexão (itemId)</label>
+    <input id="item" autocomplete="off" spellcheck="false" placeholder="Preenchido ao concluir a conexão">
+    <button id="accounts" type="button" disabled>Carregar cartões</button>
+    <label for="card">Cartão</label>
+    <select id="card" disabled><option value="">Conecte uma instituição ou informe o itemId</option></select>
+    <button id="inspect" type="button" disabled>Consultar dados e faturas</button>
+    <button id="next" type="button" disabled>Próximas transações</button>
+  </section>
+  <section id="results" aria-label="Retornos da Pluggy"></section>
+  <p>Os retornos aparecem somente nesta página. Eles ainda não substituem a demonstração do dashboard.</p>
+</body>
+</html>
