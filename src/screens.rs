@@ -1161,6 +1161,55 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
     if refresh {
         app.refresh();
     }
+    update_card(app, ui);
+}
+
+// ───────────────────────── Atualização ─────────────────────────
+
+/// Versão atual, verificação, download e reinício. O worker só existe com backend;
+/// na demonstração (e em qualquer estado anterior à 1ª verificação) o card fica quieto.
+fn update_card(app: &mut App, ui: &mut Ui) {
+    let colors = w::palette(ui.ctx());
+    let (mut check, mut restart) = (false, false);
+    w::card(ui, NORMAL, |ui| {
+        w::title(ui, "Atualização");
+        let current = env!("CARGO_PKG_VERSION");
+        use crate::update::UpdateState as S;
+        match &app.update.state {
+            S::Idle | S::Checking => {
+                w::caption(ui, format!("Versão {current}.{}", match app.update.state {
+                    S::Checking => " Verificando atualizações…",
+                    _ => "",
+                }));
+            }
+            S::Checked => {
+                w::caption(ui, format!("Versão {current}. Você está em dia."));
+                check = ui.add(egui::Button::new(format!("{} Verificar novamente", icon::ARROWS_CLOCKWISE)).min_size(vec2(0.0, 36.0))).clicked();
+            }
+            S::Available { version } => {
+                w::caption(ui, format!("Nova versão {version} disponível. Para atualizar, baixe o pacote novo em github.com/FelipeMayerDev/flounder/releases e substitua este."));
+            }
+            S::Downloading { version, frac } => {
+                w::caption(ui, format!("Nova versão {version} — baixando…"));
+                ui.add_space(w::GROUP_GAP);
+                w::progress(ui, *frac, colors.blue, 8.0, None);
+            }
+            S::Ready { version, .. } => {
+                w::caption(ui, format!("Nova versão {version} baixada. Reinicie para começar a usar."));
+                restart = w::primary_button(ui, &format!("{} Reiniciar agora", icon::ARROWS_CLOCKWISE)).clicked();
+            }
+            S::Failed(e) => {
+                w::text(ui, e.as_str(), w::regular(13.0), colors.red);
+                check = ui.add(egui::Button::new("Tentar de novo").min_size(vec2(0.0, 36.0))).clicked();
+            }
+        }
+    });
+    if check {
+        app.check_update();
+    }
+    if restart {
+        app.restart_update();
+    }
 }
 
 /// Card "Gastos compartilhados" em Ajustes: divisão pela renda e o interruptor do rateio.

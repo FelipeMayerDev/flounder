@@ -1,0 +1,71 @@
+name: Release
+
+# Tag v<versão> publica a release com os pacotes que a atualização automática procura.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # Ubuntu 22.04: a AppImage herda a glibc daqui e roda em mais sistemas.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependências (Wayland/X11 para os testes)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo test --locked
+      - name: appimagetool 1.9.1
+        run: |
+          curl -fsSL -o /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+      - run: scripts/package-appimage.sh
+      - run: scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacotes-linux
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: scripts/package-windows.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacotes-windows
+          path: |
+            dist/*.zip
+            dist/*.exe
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: A tag precisa bater com a versão do Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_NAME#v}" != "$v" ]; then
+            echo "Tag $GITHUB_REF_NAME não bate com a versão $v do Cargo.toml."
+            exit 1
+          fi
+      - name: Publica a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"

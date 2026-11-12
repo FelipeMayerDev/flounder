@@ -195,6 +195,23 @@ pub struct Remote {
     pub sync_note: Option<(String, bool)>,
 }
 
+/// Verificação e download da próxima versão. Worker criado no primeiro quadro (só com
+/// backend; demonstração não fala com a rede).
+#[derive(Default)]
+pub struct Update {
+    pub state: crate::update::UpdateState,
+    pub worker: Option<crate::update::Worker>,
+    /// "Reiniciar agora" trocou o binário: fechar a janela no fim do quadro.
+    pub restart: bool,
+}
+
+impl Update {
+    /// Versão nova disponível, baixando ou pronta: algo a mostrar em Ajustes.
+    pub fn news(&self) -> bool {
+        matches!(self.state, crate::update::UpdateState::Available { .. } | crate::update::UpdateState::Downloading { .. } | crate::update::UpdateState::Ready { .. })
+    }
+}
+
 pub struct App {
     pub connected_invoice: Option<String>,
     /// Cartões importados da Pluggy; `None` mostra os cartões manuais (demonstração).
@@ -207,6 +224,8 @@ pub struct App {
     /// Janelas de Nossa casa, Reserva e Ajustes.
     pub extra: crate::screens::Extra,
     pub remote: Option<Remote>,
+    /// Atualização automática (AppImage e Windows).
+    pub update: Update,
     /// Atualiza as contas uma vez depois da primeira carga (só com backend).
     pub auto_sync: bool,
     pub flow: crate::screens::Flow,
@@ -236,6 +255,7 @@ impl App {
             institutions: Vec::new(),
             extra: Default::default(),
             remote: None,
+            update: Update::default(),
             auto_sync: false,
             flow: Default::default(),
             data: Data::demo(),
@@ -319,6 +339,54 @@ impl App {
         }
         if let Some((state, entries)) = latest && self.form.is_none() {
             self.apply(*state, entries);
+        }
+    }
+
+    /// Recebe o que a thread de atualização mandou; worker nasce no primeiro quadro e já verifica.
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        if self.remote.is_none() {
+            return; // demonstração: sem rede
+        }
+        let u = &mut self.update;
+        let Some(w) = u.worker.as_mut() else {
+            u.worker = Some(crate::update::Worker::start(ctx.clone()));
+            u.state = crate::update::UpdateState::Checking;
+            return;
+        };
+        while let Ok(msg) = w.rx.try_recv() {
+            match msg {
+                crate::update::Msg::UpToDate => u.state = crate::update::UpdateState::Checked,
+                crate::update::Msg::Available { version } => u.state = crate::update::UpdateState::Available { version },
+                crate::update::Msg::Downloading { version } => u.state = crate::update::UpdateState::Downloading { version, frac: 0.0 },
+                crate::update::Msg::Progress(frac) => {
+                    if let crate::update::UpdateState::Downloading { frac: f, .. } = &mut u.state {
+                        *f = frac;
+                    }
+                }
+                crate::update::Msg::Ready { version, path } => u.state = crate::update::UpdateState::Ready { version, path },
+                crate::update::Msg::Failed(e) => u.state = crate::update::UpdateState::Failed(e),
+            }
+        }
+    }
+
+    /// "Verificar novamente": refaz a verificação (com download, se houver versão nova).
+    pub fn check_update(&mut self) {
+        if let Some(w) = self.update.worker.as_mut() {
+            let _ = w.tx.send(crate::update::Cmd::Check);
+            self.update.state = crate::update::UpdateState::Checking;
+        }
+    }
+
+    /// "Reiniciar agora": troca o binário pelo baixado e reabre o app; a janela fecha no fim do quadro.
+    pub fn restart_update(&mut self) {
+        let path = if let crate::update::UpdateState::Ready { path, .. } = &self.update.state {
+            path.clone()
+        } else {
+            return;
+        };
+        match crate::update::install(&path) {
+            Ok(()) => self.update.restart = true,
+            Err(e) => self.update.state = crate::update::UpdateState::Failed(e),
         }
     }
 
@@ -489,6 +557,7 @@ impl App {
             ui.set_style(ui.ctx().global_style());
         }
         self.sync(ui.ctx());
+        self.poll_update(ui.ctx());
         if self.remote.as_ref().is_some_and(|r| !r.loaded || r.me.is_none()) {
             return self.connecting(ui);
         }
@@ -530,6 +599,10 @@ impl App {
         // O agente flutuante vem por último: fica por cima de tudo.
         if self.remote.as_ref().is_some_and(|r| r.loaded) {
             crate::assistant::show(self, ui);
+        }
+        if self.update.restart {
+            // Depois do fechar, o eframe grava o estado; quem reabre já é a versão nova.
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -630,6 +703,10 @@ impl App {
             }
             let label = if s == Screen::House && self.mode == Mode::Individual { "Meu orçamento" } else { label };
             let r = w::nav_item(ui, ic, label, self.screen == s);
+            if s == Screen::Settings && self.update.news() {
+                // Pontinho de versão nova: chama a atenção para o card em Ajustes.
+                ui.painter().circle_filled(egui::pos2(r.rect.right() - 12.0, r.rect.center().y), 4.0, colors.blue);
+            }
             if self.screen == s {
                 sel = Some(r.rect);
             }

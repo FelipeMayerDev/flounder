@@ -181,12 +181,28 @@ cargo test --release --test ui -- --ignored screenshots   # regera docs/screensh
 
 ## Pacotes
 
-- Linux: `scripts/package-linux.sh` → `dist/flounder-0.1.0-linux-x86_64.tar.gz`.
+- Linux: `scripts/package-linux.sh` → `dist/flounder-0.2.0-linux-x86_64.tar.gz`.
 - AppImage: `APPIMAGETOOL=/caminho/appimagetool-x86_64.AppImage scripts/package-appimage.sh` →
-  `dist/Flounder-0.1.0-x86_64.AppImage` ([appimagetool 1.9.1](https://github.com/AppImage/appimagetool/releases/tag/1.9.1)).
+  `dist/Flounder-0.2.0-x86_64.AppImage` ([appimagetool 1.9.1](https://github.com/AppImage/appimagetool/releases/tag/1.9.1)).
   Herda a glibc da máquina de build. Em outra máquina, o `flounder.env` fica ao lado do `.AppImage`.
-- Windows ZIP e o TAR.GZ distribuível saem do workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-  (Ubuntu 22.04 e Windows Server 2022), que também roda os testes nos dois sistemas.
+- Windows: `scripts/package-windows.ps1` → `dist/flounder-0.2.0-windows-x86_64.zip` (primeira
+  instalação) e o `.exe` solto, que é o que a atualização automática baixa.
+- Release: uma tag `v<versão>` dispara o workflow [`.github/workflows/release.yml`](.github/workflows/release.yml),
+  que testa nos dois sistemas e publica na GitHub Release a AppImage, o TAR.GZ, o ZIP e o `.exe`.
+  A tag precisa bater com a versão do `Cargo.toml`; o CI ([`ci.yml`](.github/workflows/ci.yml))
+  continua empacotando a cada push.
+
+## Atualização automática
+
+Ao abrir (e em "Verificar novamente", em Ajustes), o app consulta a última release no GitHub
+(`releases/latest`), compara com a própria versão e, se houver uma mais nova, baixa o pacote
+desta instalação em segundo plano: `Flounder-<v>-x86_64.AppImage` na AppImage e
+`flounder-<v>-windows-x86_64.exe` no Windows. Em "Reiniciar agora", o binário é trocado por
+rename (o `flounder.env` ao lado do `.AppImage` não se mexe) e o app reabre sozinho.
+
+Instalações que não se atualizam sozinhas (tar.gz, `cargo run`) recebem só o aviso de versão
+nova, com o link da página de releases. Para testar contra um servidor próprio, use
+`FLOUNDER_RELEASES_URL` apontando para um JSON no mesmo formato de `releases/latest`.
 
 Windows a partir do Linux, sem MSVC (só DLLs do sistema; o UCRT já vem no Windows 10+):
 

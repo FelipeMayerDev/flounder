@@ -62,7 +62,17 @@ fn remote_app(storage: Option<&dyn eframe::Storage>) -> (App, std::sync::mpsc::S
     let (tx, _commands) = std::sync::mpsc::channel();
     let (replies, rx) = std::sync::mpsc::channel();
     app.remote.as_mut().unwrap().worker = Some(flounder::backend::Worker { client: "client-1".into(), tx, rx, pending: 0 });
+    fake_update_worker(&mut app);
     (app, replies)
+}
+
+/// Worker de atualização falso: a thread de verdade nunca nasce (nem rede nos testes).
+/// Devolve o canal para injetar `flounder::update::Msg`.
+fn fake_update_worker(app: &mut App) -> std::sync::mpsc::Sender<flounder::update::Msg> {
+    let (tx, _commands) = std::sync::mpsc::channel();
+    let (replies, rx) = std::sync::mpsc::channel();
+    app.update.worker = Some(flounder::update::Worker { tx, rx });
+    replies
 }
 
 fn fake_state() -> flounder::api::State {
@@ -746,6 +756,7 @@ fn signed_in(state: flounder::api::State, entries: Vec<Entry>, w: f32, h: f32) -
     let (tx, commands) = std::sync::mpsc::channel();
     let (replies, rx) = std::sync::mpsc::channel();
     app.remote.as_mut().unwrap().worker = Some(flounder::backend::Worker { client: "client-1".into(), tx, rx, pending: 0 });
+    fake_update_worker(&mut app);
     replies.send(Msg::State(Box::new(state), entries)).unwrap();
     (harness(app, w, h, 1.0), replies, commands)
 }
@@ -1119,6 +1130,43 @@ fn settings_rename_members_and_choose_connection_bank() {
     assert_eq!(hs.state().connections[1].institution, "Banco Inter");
     assert_eq!(hs.query_all_by_label("Atualizando contas").count(), 2, "menu e Ajustes");
     assert!(hs.query_by_label("Como conectar").is_some());
+}
+
+#[test]
+fn update_card_walks_through_download_restart_and_failure() {
+    use flounder::app::Screen;
+    use flounder::update::Msg as UMsg;
+    let (state, entries) = rich_state();
+    let mut storage = MemoryStorage::default();
+    storage.0.insert("member_client".into(), "client-1".into());
+    let mut app = App::load(Some(&storage));
+    let (tx, _commands) = std::sync::mpsc::channel();
+    let (replies, rx) = std::sync::mpsc::channel();
+    app.remote.as_mut().unwrap().worker = Some(flounder::backend::Worker { client: "client-1".into(), tx, rx, pending: 0 });
+    replies.send(Msg::State(Box::new(state), entries)).unwrap();
+    let updates = fake_update_worker(&mut app);
+    let mut hs = harness(app, 1440.0, 1600.0, 1.0);
+    hs.state_mut().screen = Screen::Settings;
+    hs.run();
+    assert!(hs.query_by_label_contains("Versão 0.").is_some(), "card quieto antes da 1ª verificação");
+    updates.send(UMsg::Downloading { version: "0.3.0".into() }).unwrap();
+    updates.send(UMsg::Progress(0.4)).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Nova versão 0.3.0 — baixando…").is_some());
+    updates.send(UMsg::Ready { version: "0.3.0".into(), path: "/tmp/.flounder.part".into() }).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Nova versão 0.3.0 baixada").is_some());
+    hs.get_by_label_contains("Reiniciar agora").click();
+    hs.run();
+    updates.send(UMsg::UpToDate).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Você está em dia").is_some());
+    updates.send(UMsg::Failed("Não foi possível verificar atualizações. Sem conexão?".into())).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Tentar de novo").is_some());
+    updates.send(UMsg::Available { version: "0.3.0".into() }).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Para atualizar, baixe o pacote novo").is_some(), "Linux sem AppImage: instrução manual");
 }
 
 /// Capturas: `cargo test --test ui -- --ignored house_reserve_settings_screenshots`.

@@ -18,6 +18,12 @@ COMO ABRIR
   Arraste pela alça de pontos no canto superior direito dos cards para mudar sua posição.
   Arraste o canto inferior direito para mudar largura e altura em passos da grade.
   O card acompanha o cursor; ao soltar, o painel se reorganiza com animação.
+
+ATUALIZAÇÃO AUTOMÁTICA
+  Ao abrir, o app confere se saiu versão nova e já baixa o pacote em segundo plano.
+  Aviso e progresso ficam em Ajustes → Atualização; quando terminar, "Reiniciar agora"
+  troca o Flounder pela versão nova e reabre o app. Na AppImage, o flounder.env ao lado
+  do .AppImage continua valendo. Funciona com AppImage (Linux) e flounder.exe (Windows).
   O layout é salvo ao fechar.
   Com a alça em foco (Tab), use as setas para mover ou redimensionar.
 

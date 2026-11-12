@@ -9,3 +9,4 @@ pub mod connected;
 pub mod api;
 pub mod backend;
 pub mod assistant;
+pub mod update;
