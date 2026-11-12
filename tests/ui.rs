@@ -329,6 +329,46 @@ fn keyboard_shortcuts_and_tab_focus() {
     assert!(hs.state().form.is_some());
 }
 
+/// Capturas da janela e da bolha do agente: `cargo test --test ui -- --ignored agent_screenshots`.
+#[test]
+#[ignore]
+fn agent_screenshots() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screenshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (state, entries) = rich_state();
+    let (mut hs, _replies, _commands) = signed_in(state, entries, 1440.0, 900.0);
+    hs.state_mut().agent.open = true;
+    hs.state_mut().agent.reports = Some(flounder::api::AssistantReports {
+        enabled: true,
+        busy: false,
+        reports: vec![
+            flounder::api::AssistantReport {
+                subject: 0,
+                content: "Setembro foi de R$ 5.200 e outubro subiu para R$ 6.100 — mais mercado e duas idas ao Tempero. 🐠\nA dica: marcar o mercado como conta fixa evita susto no fim do mês. Nada de pânico: a reserva cobre o mapa inteiro.".into(),
+                generated_at: "2026-11-12T18:30:00.000Z".into(),
+                period_start: "2026-08-01".into(),
+                period_end: "2026-11-12".into(),
+            },
+            flounder::api::AssistantReport {
+                subject: 2,
+                content: "O casal gastou R$ 8.900 em outubro e a divisão da casa segue pela renda. Continuem guardando R$ 700 por mês que a meta chega no prazo. 🐠".into(),
+                generated_at: "2026-11-12T18:30:00.000Z".into(),
+                period_start: "2026-08-01".into(),
+                period_end: "2026-11-12".into(),
+            },
+        ],
+    });
+    hs.state_mut().agent.chat = vec![
+        flounder::api::ChatMsg { role: "user".into(), content: "Como está meu mês?".into() },
+        flounder::api::ChatMsg { role: "assistant".into(), content: "Nadando bem! As compras de cartão somam R$ 1.870 e a fatura fecha em R$ 2.558 — nada fora d'água. 🐠".into() },
+    ];
+    hs.run();
+    hs.render().unwrap().save(dir.join("agente-janela.png")).unwrap();
+    hs.state_mut().agent.open = false;
+    hs.run();
+    hs.render().unwrap().save(dir.join("agente-bolha.png")).unwrap();
+}
+
 /// Capturas do painel: `cargo test --release --test ui -- --ignored`.
 #[test]
 #[ignore]

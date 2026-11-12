@@ -6,7 +6,7 @@ use crate::app::App;
 use crate::backend::Cmd;
 use crate::model::local_time;
 use crate::widgets::{self as w};
-use egui::{pos2, vec2, Align, Align2, CornerRadius, Id, Layout, Sense, Ui, Vec2};
+use egui::{pos2, vec2, Align, Align2, Color32, CornerRadius, Id, Layout, Sense, Stroke, Ui, Vec2};
 use egui_phosphor::regular as icon;
 use std::time::{Duration, Instant};
 
@@ -139,19 +139,31 @@ fn window(app: &mut App, ctx: &egui::Context) {
         .order(egui::Order::Foreground)
         .default_size(vec2(480.0, 580.0))
         .min_width(420.0)
-        .frame(egui::Frame::new().fill(colors.card).corner_radius(16).inner_margin(20).shadow(egui::epaint::Shadow { offset: [0, 10], blur: 28, spread: 0, color: colors.line.gamma_multiply(0.6) }))
+        .frame(egui::Frame::new().fill(colors.card).corner_radius(16).inner_margin(20).shadow(egui::epaint::Shadow { offset: [0, 12], blur: 32, spread: 0, color: egui::Color32::from_black_alpha(70) }))
         .show(ctx, |ui| {
+            let t = ctx.input(|i| i.time) as f32;
+            let (bob, breath) = if w::motion(ctx) { ((t * 1.6).sin() * 2.5, (t * 1.1).sin() * 1.5) } else { (0.0, 0.0) };
             ui.horizontal(|ui| {
-                w::art(ui, w::Art::Fish, 36.0);
+                ui.allocate_ui(vec2(46.0, 46.0), |ui| {
+                    let center = ui.min_rect().left_top() + vec2(23.0, 23.0 + bob);
+                    w::paint_art(ui, w::Art::Fish, center, 42.0 + breath);
+                });
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     w::text(ui, "Flounder", w::bold(16.0), colors.text);
-                    w::caption(ui, format!("Consultor de {} e do casal 🐠", names[me]));
+                    w::caption(ui, format!("Consultor de {} e do casal", names[me]));
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if w::icon_button(ui, icon::X, "Fechar o Flounder").clicked() {
                         close = true;
                     }
+                    let enabled = app.agent.reports.as_ref().is_some_and(|r| r.enabled);
+                    if enabled {
+                        w::chip(ui, "GLM · online", colors.blue, colors.blue_soft);
+                    } else {
+                        w::chip(ui, "desligado", colors.muted, colors.faint);
+                    }
+                    ui.add_space(8.0);
                 });
             });
             ui.add_space(w::GROUP_GAP);
@@ -177,24 +189,31 @@ fn window(app: &mut App, ctx: &egui::Context) {
             let report = reports.reports.iter().find(|r| r.subject == subject);
             let busy = reports.busy || app.agent.waiting_analysis;
             w::card(ui, w::Dens { pad: 16.0, gap: 8.0 }, |ui| {
-                w::text(ui, if tab == Tab::Mine { "Sua análise" } else { "Análise do casal" }, w::semibold(14.0), colors.text);
                 match report {
                     Some(report) => {
+                        ui.horizontal(|ui| {
+                            w::text(ui, icon::SPARKLE, w::regular(15.0), colors.blue);
+                            w::text(ui, if tab == Tab::Mine { "Sua análise" } else { "Análise do casal" }, w::semibold(14.0), colors.text);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if let Some((d, hm)) = local_time(&report.generated_at) {
+                                    w::caption(ui, format!("{} às {}", d.short(), hm));
+                                }
+                            });
+                        });
                         if switched {
                             app.agent.reveal = None;
                         }
                         let content = report.content.clone();
                         let shown = reveal_chars(ctx, &mut app.agent.reveal, tab, &content);
                         let text: String = content.chars().take(shown).collect();
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         for line in text.lines() {
                             ui.label(egui::RichText::new(line).font(w::regular(13.0)).color(colors.text));
                         }
                         if shown < content.chars().count() {
                             ctx.request_repaint_after(Duration::from_millis(50));
                         }
-                        if let Some((d, hm)) = local_time(&report.generated_at) {
-                            w::caption(ui, format!("Gerada em {} às {} · período de {} a {}", d.fmt(), hm, short_month(&report.period_start), short_month(&report.period_end)));
-                        }
+                        w::caption(ui, format!("Período de {} a {}", short_month(&report.period_start), short_month(&report.period_end)));
                     }
                     None if busy => {
                         w::caption(ui, "O Flounder está analisando os gastos… nada de nadar sem olhar o mapa primeiro.");
@@ -288,9 +307,18 @@ fn chat(app: &mut App, ui: &mut Ui, send: &mut bool) {
     });
     ui.add_space(w::GROUP_GAP);
     ui.horizontal(|ui| {
-        let input = ui.add(w::text_input(&mut app.agent.input, "Escreva aqui…").desired_width(ui.available_width() - 96.0));
-        let pressed = w::primary_button(ui, &format!("{} Enviar", icon::PAPER_PLANE_RIGHT)).clicked()
-            || input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let row = ui.available_width();
+        let input = egui::Frame::new()
+            .fill(colors.faint)
+            .corner_radius(CornerRadius::same(14))
+            .inner_margin(egui::Margin::symmetric(10, 7))
+            .stroke(Stroke::new(1.0, colors.line))
+            .show(ui, |ui| {
+                ui.add(w::text_input(&mut app.agent.input, "Pergunte qualquer coisa…").frame(egui::Frame::new()).desired_width(row - 88.0))
+            }).inner;
+        let send_btn = egui::Button::new(egui::RichText::new(icon::PAPER_PLANE_RIGHT).font(w::semibold(15.0)).color(colors.bg))
+            .fill(colors.blue).corner_radius(CornerRadius::same(10)).min_size(vec2(36.0, 36.0));
+        let pressed = ui.add(send_btn).clicked() || input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if pressed && !app.agent.input.trim().is_empty() && !app.agent.waiting_chat {
             *send = true;
         }
@@ -302,14 +330,21 @@ fn chat(app: &mut App, ui: &mut Ui, send: &mut bool) {
 
 /// Um balão de conversa: o do usuário alinhado à direita, o do peixe à esquerda com avatar.
 fn bubble_line(ui: &mut Ui, colors: &w::Palette, mine: bool, text: &str) {
+    let row = ui.available_width();
     ui.with_layout(if mine { Layout::right_to_left(Align::Min) } else { Layout::left_to_right(Align::Min) }, |ui| {
         if !mine {
-            w::art(ui, w::Art::Fish, 28.0);
+            w::art(ui, w::Art::Fish, 26.0);
+            ui.add_space(2.0);
         }
-        let (fill, fg) = if mine { (colors.blue_soft, colors.text) } else { (colors.faint, colors.text) };
-        egui::Frame::new().fill(fill).corner_radius(CornerRadius::same(12)).inner_margin(10).show(ui, |ui| {
-            ui.set_max_width(ui.available_width().min(340.0));
-            ui.label(egui::RichText::new(text).font(w::regular(13.0)).color(fg));
+        let (fill, corner) = if mine {
+            (colors.blue_soft, CornerRadius { nw: 14, ne: 4, sw: 14, se: 14 })
+        } else {
+            (colors.faint, CornerRadius { nw: 4, ne: 14, sw: 14, se: 14 })
+        };
+        egui::Frame::new().fill(fill).corner_radius(corner).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.set_max_width((row * 0.72).max(180.0));
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(egui::RichText::new(text).font(w::regular(13.0)).color(colors.text));
         });
     });
 }

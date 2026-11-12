@@ -135,6 +135,8 @@ pub fn install(ctx: &egui::Context) {
         ("inter-sb", include_bytes!("../assets/fonts/Inter-SemiBold.ttf")),
         ("inter-b", include_bytes!("../assets/fonts/Inter-Bold.ttf")),
         ("phosphor", egui_phosphor::Variant::Regular.font_bytes()),
+        // Emojis do assistente (Noto Emoji monocromático, OFL — ver LICENSE-NotoEmoji.txt).
+        ("noto-emoji", include_bytes!("../assets/fonts/NotoEmoji.ttf")),
     ] {
         f.font_data.insert(k.into(), Arc::new(FontData::from_static(b)));
     }
@@ -145,8 +147,9 @@ pub fn install(ctx: &egui::Context) {
         (FontFamily::Name("bold".into()), "inter-b"),
     ] {
         // A Inter incorporada teve a área privada do Unicode removida (ver assets/fonts/README.md),
-        // senão os glifos dela encobririam os ícones Phosphor.
-        f.families.insert(fam, vec![main.into(), "phosphor".into()]);
+        // senão os glifos dela encobririam os ícones Phosphor. O emoji entra por último: só atende
+        // o que Inter e Phosphor não têm.
+        f.families.insert(fam, vec![main.into(), "phosphor".into(), "noto-emoji".into()]);
     }
     ctx.set_fonts(f);
     load_art(ctx);

@@ -5,7 +5,7 @@ A página inicial usa o **Painel equilibrado**, com calendário de vencimentos i
 Todas as telas funcionam: Visão geral, Fluxo de caixa, Cartões, Nossa casa, Reserva e Ajustes.
 
 - Página inicial: [prévia completa](docs/screenshots/painel-completo.png)
-- Capturas: [`docs/screenshots/`](docs/screenshots)
+- Capturas: [`docs/screenshots/`](docs/screenshots) — a janela e a bolha do agente: `agente-janela.png` / `agente-bolha.png`
 - Instruções do pacote para quem só vai abrir o app: [`docs/EXECUTAR.txt`](docs/EXECUTAR.txt)
 
 ## Dados reais
