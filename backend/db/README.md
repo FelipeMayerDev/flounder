@@ -116,3 +116,20 @@ Decisões:
   de outro domicílio ou de outro dono. Não há RLS: todo endpoint filtra pelo domicílio do
   membro cujo `client_user_id` é o cliente autenticado.
 - Só os 4 últimos dígitos do cartão; nada de CPF, nome do titular ou credenciais.
+
+## Servidor
+
+Em `/opt/docker/finance` no servidor (`ssh servidor`), com o código do repositório:
+
+- `.env` (600): `POSTGRES_PASSWORD` próprio do servidor e `POSTGRES_PORT=5433` (só loopback).
+- `backend/.env` (600): `CLIENT_ID`, `CLIENT_SECRET`, `APP_TOKEN_1`, `APP_TOKEN_2` (os mesmos do
+  desktop), `DATABASE_URL=host=127.0.0.1 port=5433 …` e `BIND_ADDR=<IP Tailscale do servidor>:3021`.
+- `docker compose --profile server up -d --build`: PostgreSQL e backend. O backend usa a rede do
+  host e escuta só no IP Tailscale, sem exposição à internet nem à rede local.
+
+No desktop, `FLOUNDER_BACKEND_URL=http://<IP Tailscale>:3021` no `backend/.env` local aponta o app
+para o servidor (os tokens continuam sendo lidos desse arquivo).
+
+Atualizar: enviar o código novo (`git archive HEAD | ssh servidor tar -x -C /opt/docker/finance`)
+e repetir o `up -d --build`; as migrações rodam na inicialização. Backup:
+`docker compose exec -T postgres pg_dump -U flounder -d flounder -n finance > backup.sql`.

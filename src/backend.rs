@@ -80,7 +80,7 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
         Ok(t) => t,
         Err(e) => return send(Msg::Offline(e)),
     };
-    let base = std::env::var("FLOUNDER_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
+    let base = base_url();
     let base = base.trim_end_matches('/');
     let auth = format!("Bearer {token}");
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(5))).build().into();
@@ -237,7 +237,7 @@ fn describe(e: ureq::Error, base: &str) -> String {
 // ponytail: o token aparece por instantes na linha de comando do xdg-open/navegador, visível a outros
 // usuários desta máquina; ok para o uso pessoal local. Windows não tem abridor aqui.
 pub fn open_connect(client: &str) -> Result<(), String> {
-    let base = std::env::var("FLOUNDER_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
+    let base = base_url();
     let url = format!("{}/connect#token={}", base.trim_end_matches('/'), token(client)?);
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(opener).arg(url).spawn().map(drop)
@@ -249,15 +249,31 @@ pub fn open_connect(client: &str) -> Result<(), String> {
 fn token(client: &str) -> Result<String, String> {
     let n = client.strip_prefix("client-").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         .ok_or_else(|| format!("Membro desconhecido: {client}."))?;
-    let path = std::env::var_os("FLOUNDER_BACKEND_ENV").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env").into());
+    let path = env_path();
     let missing = || format!("Não foi possível ler APP_TOKEN_{n} em {}. {RUN_LOCAL}", path.display());
     let text = std::fs::read_to_string(&path).map_err(|_| missing())?;
     find_token(&text, n).ok_or_else(missing)
 }
 
+fn env_path() -> std::path::PathBuf {
+    std::env::var_os("FLOUNDER_BACKEND_ENV").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env").into())
+}
+
+/// Endereço do backend: variável `FLOUNDER_BACKEND_URL`, senão a mesma chave no `.env` local
+/// (aponta o app para o servidor sem mexer no atalho), senão o backend local.
+fn base_url() -> String {
+    let url = std::env::var("FLOUNDER_BACKEND_URL").ok()
+        .or_else(|| env_value(&std::fs::read_to_string(env_path()).ok()?, "FLOUNDER_BACKEND_URL"))
+        .unwrap_or_else(|| "http://127.0.0.1:3001".into());
+    url.trim_end_matches('/').to_string()
+}
+
 fn find_token(env: &str, n: &str) -> Option<String> {
-    let key = format!("APP_TOKEN_{n}");
+    env_value(env, &format!("APP_TOKEN_{n}"))
+}
+
+fn env_value(env: &str, key: &str) -> Option<String> {
     env.lines()
         .filter_map(|line| line.trim().split_once('='))
         .find(|(name, _)| name.trim().trim_start_matches("export ").trim() == key)

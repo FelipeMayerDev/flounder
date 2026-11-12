@@ -22,5 +22,21 @@ services:
       retries: 12
     stop_grace_period: 30s
 
+  # Só no servidor: docker compose --profile server up -d --build
+  # Rede do host para escutar só no IP Tailscale (BIND_ADDR em backend/.env); se o Tailscale
+  # ainda não subiu, o processo sai e o Docker tenta de novo.
+  backend:
+    profiles: [server]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: flounder-backend:local
+    restart: unless-stopped
+    network_mode: host
+    env_file: backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
