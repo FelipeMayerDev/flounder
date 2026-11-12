@@ -256,13 +256,15 @@ fn token(client: &str) -> Result<String, String> {
 }
 
 /// `FLOUNDER_BACKEND_ENV`, senão o `backend/.env` do projeto (máquina de desenvolvimento), senão
-/// `flounder.env` ao lado do executável (pacote em outra máquina: só tokens e endereço).
+/// `flounder.env` ao lado do executável ou do .AppImage (outra máquina: só tokens e endereço).
 fn env_path() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("FLOUNDER_BACKEND_ENV") {
         return path.into();
     }
     let dev = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env"));
-    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("flounder.env")));
+    // Numa AppImage o executável roda de uma montagem temporária: vale a pasta do .AppImage.
+    let exe = std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok());
+    let beside = exe.and_then(|exe| Some(exe.parent()?.join("flounder.env")));
     match beside {
         Some(path) if !dev.exists() => path,
         _ => dev,

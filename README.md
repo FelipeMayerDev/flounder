@@ -141,6 +141,9 @@ cargo test --release --test ui -- --ignored screenshots   # regera docs/screensh
 ## Pacotes
 
 - Linux: `scripts/package-linux.sh` → `dist/flounder-0.1.0-linux-x86_64.tar.gz`.
+- AppImage: `APPIMAGETOOL=/caminho/appimagetool-x86_64.AppImage scripts/package-appimage.sh` →
+  `dist/Flounder-0.1.0-x86_64.AppImage` ([appimagetool 1.9.1](https://github.com/AppImage/appimagetool/releases/tag/1.9.1)).
+  Herda a glibc da máquina de build. Em outra máquina, o `flounder.env` fica ao lado do `.AppImage`.
 - Windows ZIP e o TAR.GZ distribuível saem do workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
   (Ubuntu 22.04 e Windows Server 2022), que também roda os testes nos dois sistemas.
 
