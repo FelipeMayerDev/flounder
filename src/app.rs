@@ -661,7 +661,7 @@ impl App {
             let label = if r.syncing { format!("{} Atualizando…", icon::HOURGLASS) } else { format!("{} Atualizar contas", icon::ARROWS_CLOCKWISE) };
             let b = ui.add_enabled(!r.syncing, egui::Button::new(label).min_size(vec2(ui.available_width(), 36.0)));
             b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, !r.syncing, if r.syncing { "Atualizando contas" } else { "Atualizar contas" }));
-            refresh = b.on_hover_text(crate::screens::SYNC_TIP).clicked();
+            refresh = b.on_hover_ui(crate::screens::sync_tip).clicked();
         });
         if refresh {
             self.refresh();
