@@ -109,13 +109,18 @@ fn update_checks_downloads_and_swaps_the_appimage_end_to_end() {
     hs.run_steps(3);
 
     assert_eq!(std::fs::read(&appimage).unwrap(), package, "o AppImage falso virou o pacote baixado");
-    // O spawn é assíncrono: esperar o marcador que a versão nova escreve.
-    let mut reabriu = false;
-    for _ in 0..40 {
-        if marker.exists() { reabriu = true; break; }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // O spawn é assíncrono: esperar o marcador que a versão nova escreve. Só no unix —
+    // no Windows o stub `#!/bin/sh` não executa: a troca acontece, mas o install devolve
+    // o erro de reabertura (que o app mostra em Ajustes).
+    #[cfg(unix)]
+    {
+        let mut reabriu = false;
+        for _ in 0..40 {
+            if marker.exists() { reabriu = true; break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(reabriu, "a versão nova reabriu sozinha");
     }
-    assert!(reabriu, "a versão nova reabriu sozinha");
 
     stop.store(true, Ordering::SeqCst);
     unsafe { std::env::remove_var("FLOUNDER_RELEASES_URL") };
