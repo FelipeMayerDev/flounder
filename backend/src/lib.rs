@@ -193,6 +193,7 @@ fn build_router(
         assist: Mutex::new(()),
     });
     assistant::spawn_daily(state.clone());
+    db::spawn_sync_loop(state.clone());
     let private = Router::new()
         .route("/api/connect-token", post(connect_token))
         .route("/api/items/{id}/accounts", get(accounts))

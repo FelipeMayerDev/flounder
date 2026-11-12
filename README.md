@@ -33,7 +33,9 @@ no executável (`Data::demo()` fica só para testes, capturas e `examples/export
   não volta na próxima importação.
 - **Atualizar contas** (menu lateral): `POST /api/sync` reimporta todas as conexões do domicílio
   (até 90 s; as outras chamadas usam 5 s) e mostra quantas conexões foram atualizadas ou falharam.
-  Roda uma vez sozinho depois da primeira carga a cada abertura.
+  Roda uma vez sozinho depois da primeira carga a cada abertura — e o **backend também reimporta
+  tudo sozinho a cada 6 horas** (5 minutos depois de subir): compras novas no cartão chegam sem
+  abrir o app.
 - **Hoje** é a data atual em São Paulo (UTC−3 fixo). Testes e capturas usam 10/11/2026.
 
 ## Fluxo de caixa e Cartões

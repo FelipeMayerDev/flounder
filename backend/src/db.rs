@@ -1014,21 +1014,36 @@ pub(super) async fn sync(
     State(state): State<Arc<Backend>>,
     Extension(user): Extension<User>,
 ) -> Result<Json<api::SyncResult>, ApiError> {
+    Ok(Json(sync_connections(&state, Some(&user)).await?))
+}
+
+/// Importa todas as conexões do domicílio de `user` — ou, com `None`, de todos os domicílios
+/// (usado pela sincronização automática em segundo plano).
+async fn sync_connections(state: &Backend, user: Option<&User>) -> Result<api::SyncResult, ApiError> {
     // ponytail: uma sincronização por vez no processo todo; suficiente para um casal.
     let _running = state.sync.lock().await;
     state.pluggy.api_key().await?;
-    let items: Vec<(String, String)> = state
-        .db()
-        .await?
-        .query(
-            &format!("SELECT c.external_id, m.client_user_id FROM bank_connections c JOIN members m ON m.id = c.owner_id
-                 WHERE c.household_id = {HOUSEHOLD} ORDER BY m.position, c.external_id"),
-            &[&user.0],
-        )
-        .await?
-        .iter()
-        .map(|row| (row.get(0), row.get(1)))
-        .collect();
+    let db = state.db().await?;
+    let rows = match user {
+        Some(user) => {
+            db.query(
+                &format!("SELECT c.external_id, m.client_user_id FROM bank_connections c JOIN members m ON m.id = c.owner_id
+                     WHERE c.household_id = {HOUSEHOLD} ORDER BY m.position, c.external_id"),
+                &[&user.0],
+            )
+            .await?
+        }
+        None => {
+            db.query(
+                "SELECT c.external_id, m.client_user_id FROM bank_connections c JOIN members m ON m.id = c.owner_id
+                 ORDER BY m.position, c.external_id",
+                &[],
+            )
+            .await?
+        }
+    };
+    let items: Vec<(String, String)> = rows.iter().map(|row| (row.get(0), row.get(1))).collect();
+    drop(db);
     let mut result = api::SyncResult::default();
     for (item, client) in items {
         // O item é consultado como o seu dono: a Pluggy confere o clientUserId.
@@ -1048,7 +1063,31 @@ pub(super) async fn sync(
             }
         }
     }
-    Ok(Json(result))
+    Ok(result)
+}
+
+/// Em segundo plano: reimporta todas as conexões periodicamente, para as compras novas
+/// chegarem sozinhas (o desktop também sincroniza ao abrir e pelo botão "Atualizar contas").
+/// Falhas são só registradas no log; a próxima rodada tenta de novo.
+pub(super) fn spawn_sync_loop(state: Arc<Backend>) {
+    if !state.config.pluggy_configured() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut first = true;
+        loop {
+            // Primeira passada 5 minutos depois do boot; depois a cada 6 horas.
+            tokio::time::sleep(if first { Duration::from_secs(5 * 60) } else { Duration::from_secs(6 * 3600) }).await;
+            first = false;
+            match sync_connections(&state, None).await {
+                Ok(result) if result.failed == 0 => {
+                    println!("Sincronização automática: {} conexão(ões) atualizada(s).", result.synced)
+                }
+                Ok(result) => eprintln!("Sincronização automática: {} ok, {} com falha.", result.synced, result.failed),
+                Err(error) => eprintln!("Sincronização automática adiada ({}).", error.1),
+            }
+        }
+    });
 }
 
 pub(super) async fn create_settlement(
