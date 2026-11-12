@@ -154,6 +154,18 @@ cargo zigbuild --release --locked --target x86_64-pc-windows-gnu
 
 O TAR.GZ gerado localmente herda a glibc da máquina de build; use o do CI (glibc 2.35) para distribuir.
 
+Em outra máquina (sem o repositório), coloque ao lado do executável um `flounder.env` só com o
+endereço do servidor e o token de quem vai usar — nunca o `backend/.env` inteiro, que tem as chaves
+do Pluggy:
+
+```
+FLOUNDER_BACKEND_URL=https://finance.felipemayer.com.br
+APP_TOKEN_1=…
+```
+
+O app procura, nesta ordem: `FLOUNDER_BACKEND_ENV`, o `backend/.env` do projeto e o `flounder.env`
+ao lado do executável.
+
 ## Estrutura
 
 | Arquivo | Papel |

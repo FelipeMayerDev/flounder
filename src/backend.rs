@@ -255,9 +255,18 @@ fn token(client: &str) -> Result<String, String> {
     find_token(&text, n).ok_or_else(missing)
 }
 
+/// `FLOUNDER_BACKEND_ENV`, senão o `backend/.env` do projeto (máquina de desenvolvimento), senão
+/// `flounder.env` ao lado do executável (pacote em outra máquina: só tokens e endereço).
 fn env_path() -> std::path::PathBuf {
-    std::env::var_os("FLOUNDER_BACKEND_ENV").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env").into())
+    if let Some(path) = std::env::var_os("FLOUNDER_BACKEND_ENV") {
+        return path.into();
+    }
+    let dev = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env"));
+    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("flounder.env")));
+    match beside {
+        Some(path) if !dev.exists() => path,
+        _ => dev,
+    }
 }
 
 /// Endereço do backend: variável `FLOUNDER_BACKEND_URL`, senão a mesma chave no `.env` local
