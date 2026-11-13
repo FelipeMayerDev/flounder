@@ -1,0 +1,19 @@
+[package]
+name = "flounder-mobile"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "wgpu", "wayland", "x11", "persistence"] }
+egui = "=0.36.2"
+egui-phosphor = "=0.14.0"
+flounder = { path = ".." }
+
+[dev-dependencies]
+egui_kittest = { version = "=0.36.2", features = ["wgpu", "snapshot", "eframe"] }
+
+[profile.release]
+strip = true
+lto = "thin"

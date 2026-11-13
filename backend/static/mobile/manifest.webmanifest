@@ -1,0 +1,14 @@
+{
+  "name": "Flounder · Finanças em casal",
+  "short_name": "Flounder",
+  "description": "Finanças em casal: fluxo, cartões e contas da casa.",
+  "lang": "pt-BR",
+  "start_url": "/m",
+  "scope": "/m",
+  "display": "standalone",
+  "background_color": "#eef1f7",
+  "theme_color": "#2f6cff",
+  "icons": [
+    { "src": "/m/art/tropical_fish.png", "sizes": "256x256", "type": "image/png", "purpose": "any" }
+  ]
+}
