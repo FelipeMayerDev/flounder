@@ -4,12 +4,32 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
+resolver = "2"
+# Android: lib como cdylib (o .so que o APK carrega) + rlib para os testes.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.android]
+package = "br.com.felipemayer.flounder"
+apk_name = "Flounder"
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
 
 [dependencies]
-eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "wgpu", "wayland", "x11", "persistence"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["wgpu", "wayland", "x11", "persistence"] }
 egui = "=0.36.2"
 egui-phosphor = "=0.14.0"
 flounder = { path = ".." }
+
+# Desktop: accesskit (no Android, native-activity não combina com accesskit no eframe 0.36).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit"] }
+
+# Android: entry nativo (NativeActivity) com o mesmo eframe.
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["android-native-activity"] }
+winit = "=0.30.13"
 
 [dev-dependencies]
 egui_kittest = { version = "=0.36.2", features = ["wgpu", "snapshot", "eframe"] }

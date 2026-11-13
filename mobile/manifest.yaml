@@ -1,0 +1,14 @@
+# Configuração do APK para o xbuild (`x build`).
+android:
+  manifest:
+    package: br.com.felipemayer.flounder
+    version_code: 21
+    version_name: "0.2.1"
+    sdk:
+      min_sdk_version: 26
+      target_sdk_version: 33
+    application:
+      label: Flounder
+      theme: "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+      has_code: false
+  icon: assets/icon-512.png

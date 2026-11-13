@@ -26,15 +26,26 @@ cargo test --manifest-path mobile/Cargo.toml --test snap -- --ignored
 | `src/mock.rs` | Dados de demonstração (Dezembro 2026 + Novembro). Fase 2: `flounder::model::Data` da API. |
 | `src/screens/` | As 4 telas: `home` (Início), `flow` (Fluxo), `cards` (Cartões), `house` (Casa). |
 
-## Caminho para o celular (Android)
+## Caminho para o celular (Android) — APK
 
-O app é o mesmo binário nativo; o empacotamento Android usa `cargo-ndk` + o template de
-projeto do eframe ([egui mobile](https://github.com/rust-mobile/egui)):
+O mesmo binário nativo empacotado como APK pelo [xbuild](https://github.com/rust-mobile/xbuild),
+sem Gradle. Requisitos (um só, na primeira vez): JDK 17, Android SDK + NDK (via `sdkmanager`)
+e `rustup target add aarch64-linux-android`.
 
-1. `rustup target add aarch64-linux-android`
-2. `cargo install cargo-ndk` + Android SDK/NDK (`sdkmanager "ndk;27.0.11718014"`)
-3. `cargo ndk -t arm64-v8a -o ./jniLibs build --release --manifest-path mobile/Cargo.toml`
-4. Embraçar o `.so` num template Gradle (o repositório rust-mobile/egui tem o `apk.template`)
+```sh
+export JAVA_HOME=~/tools/jdk-17.0.21+9
+export ANDROID_HOME=~/Android/Sdk
+export NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
+export PATH="$JAVA_HOME/bin:$PATH"
+x build --release --platform android --arch arm64 --format apk
+# → mobile/target/x/release/android/flounder-mobile.apk
+#   (config do APK: mobile/manifest.yaml; ícone ≥512px em mobile/assets/)
+```
+
+`android_main` (NativeActivity) vive em `mobile/src/lib.rs`; o `Cargo.toml` do mobile tem os
+metadados do APK (pacote `br.com.felipemayer.flounder`, minSdk 26). Instalar: copie o APK pro
+celular e abra, ou `adb install`. O APK 0.2.1 também fica em
+`https://finance.felipemayer.com.br/releases/Flounder-0.2.1-arm64.apk`.
 
 iOS exige Xcode/macOS (fase futura, em uma máquina Apple — o código egui é o mesmo).
 
