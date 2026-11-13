@@ -1,6 +1,6 @@
 //! Tela Cartões — total das faturas do mês e um bloco por cartão de crédito.
 
-use egui::{Align, CornerRadius, Layout, Rect, Sense, Vec2};
+use egui::{Align, Color32, CornerRadius, Frame, Layout, Rect, Sense, Vec2, pos2};
 use egui_phosphor::regular as icon;
 use flounder::widgets as w;
 
@@ -66,6 +66,20 @@ fn item(ui: &mut egui::Ui, cartao: &Cartao, limite_txt: &str, c: &Cores) {
             cartao.cor,
         );
         ui.add_space(8.0);
+
+        // Marca d'água do banco: logo grande e translúcido no fundo do bloco (lado direito).
+        if let Some(key) = w::logo_key(&cartao.banco)
+            && let Some(logo) = w::logo_textura(key, false)
+            && logo.size()[0] > 0
+        {
+            let altura = 110.0;
+            let largura = altura * logo.size()[0] as f32 / logo.size()[1] as f32;
+            let marca = Rect::from_min_size(
+                pos2(topo.right() - largura - 12.0, topo.min.y + 14.0),
+                Vec2::new(largura, altura),
+            );
+            ui.painter().image(logo.id(), marca, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(70));
+        }
 
         // Header: bolinha com a inicial, nome do banco, chip de status e caret.
         ui.horizontal(|ui| {

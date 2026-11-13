@@ -68,7 +68,8 @@ impl MobileApp {
         MobileApp {
             y: 2026,
             m: 12,
-            tab: Tab::Inicio,
+            // FLOUNDER_TAB=cards abre direto em Cartões (útil para testar a janela real).
+        tab: if std::env::var("FLOUNDER_TAB").as_deref() == Ok("cards") { Tab::Cartoes } else { Tab::Inicio },
             eu: 0,
             filtro_casa: Filtro::Todas,
             mock: mock::para(2026, 12),
@@ -349,11 +350,44 @@ fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
     ui.label(egui::RichText::new("Novo cartão").font(w::bold(17.0)).color(c.ink));
     ui.label(egui::RichText::new(format!("Aparece na lista de cartões de {}.", app.mes_label())).font(w::regular(13.0)).color(c.muted));
     ui.add_space(10.0);
-    let mut banco = sheet.banco.clone();
+    // Bancos com logo: toque escolhe; o campo de texto continua para nomes fora da lista.
+    let bancos = ["Santander", "Nubank", "Inter", "Bradesco", "Caixa", "C6 Bank", "PicPay", "Banco do Brasil"];
+    let mut banco_escolhido: Option<String> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for banco in bancos {
+            let escolhido = sheet.banco == *banco;
+            let resp = Frame::new()
+                .fill(if escolhido { c.blue_soft } else { c.line })
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    let logo = w::logo_key(banco).and_then(|key| w::logo_textura(key, false));
+                    match logo {
+                        Some(logo) => {
+                            let nat = logo.size();
+                            let altura = 16.0;
+                            let largura = (altura * nat[0] as f32 / nat[1] as f32).min(90.0);
+                            ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(&logo, Vec2::new(largura, altura))));
+                        }
+                        None => {
+                            ui.label(egui::RichText::new(banco.to_string()).font(w::semibold(12.0)).color(c.ink));
+                        }
+                    }
+                })
+                .response
+                .interact(egui::Sense::click());
+            if resp.clicked() {
+                banco_escolhido = Some((*banco).to_owned());
+            }
+        }
+    });
+    ui.add_space(10.0);
+    let mut banco = banco_escolhido.unwrap_or_else(|| sheet.banco.clone());
     let mut limite = sheet.limite.clone();
     let mut venc = sheet.venc.clone();
     let mut fecha = sheet.fecha.clone();
-    campo(ui, "Banco ou nome do cartão", &mut banco, "Ex.: Santander Unique");
+    campo(ui, "Banco (toque acima ou escreva)", &mut banco, "Ex.: Santander Unique");
     campo(ui, "Limite (R$)", &mut limite, "0,00");
     ui.columns(2, |c| {
         campo(&mut c[0], "Fecha no dia", &mut fecha, "1-31");

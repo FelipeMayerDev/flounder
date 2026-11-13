@@ -3,9 +3,10 @@
 use crate::model::{money, split_money, Bill, Cents, Status};
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    pos2, vec2, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Pos2, Rect, Response, Sense, Shadow, Shape,
+    pos2, vec2, Align, Vec2, Align2, Color32, CornerRadius, FontFamily, FontId, Id, Pos2, Rect, Response, Sense, Shadow, Shape,
     Stroke, Ui, UiBuilder, WidgetInfo, WidgetType,
 };
+use std::collections::HashMap;
 use egui_phosphor::regular as icon;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -126,6 +127,54 @@ pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
 }
 
+
+/// Logos de bancos com fundo transparente (assets/logos; Wikimedia, altura 120px).
+const LOGOS: [(&str, &[u8]); 8] = [
+    ("santander", include_bytes!("../assets/logos/santander.png")),
+    ("nubank", include_bytes!("../assets/logos/nubank.png")),
+    ("inter", include_bytes!("../assets/logos/inter.png")),
+    ("bradesco", include_bytes!("../assets/logos/bradesco.png")),
+    ("caixa", include_bytes!("../assets/logos/caixa.png")),
+    ("c6", include_bytes!("../assets/logos/c6.png")),
+    ("picpay", include_bytes!("../assets/logos/picpay.png")),
+    ("bb", include_bytes!("../assets/logos/bb.png")),
+];
+
+/// Texturas dos logos, por chave (e variante `-w` branca para os cartões com gradiente).
+static LOGO_TEXTURAS: std::sync::OnceLock<HashMap<String, egui::TextureHandle>> = std::sync::OnceLock::new();
+
+/// Chave do logo do banco pelo nome da instituição ("Santander", "Banco do Brasil"…).
+/// `None` = sem logo embutida: quem desenha usa o texto de sempre.
+pub fn logo_key(nome: &str) -> Option<&'static str> {
+    let mut b = nome.to_lowercase();
+    for (de, para) in [
+        ("á", "a"), ("à", "a"), ("ã", "a"), ("â", "a"), ("é", "e"), ("ê", "e"), ("í", "i"),
+        ("ó", "o"), ("ô", "o"), ("ú", "u"), ("ü", "u"), ("ç", "c"),
+    ] {
+        b = b.replace(de, para);
+    }
+    let pares: &[(&str, &str)] = &[
+        ("santander", "santander"),
+        ("nubank", "nubank"),
+        ("inter", "inter"),
+        ("bradesco", "bradesco"),
+        ("caixa", "caixa"),
+        ("c6", "c6"),
+        ("picpay", "picpay"),
+        ("banco do brasil", "bb"),
+        ("brasil", "bb"),
+    ];
+    let (_, key) = pares.iter().find(|(tem, _)| b.contains(tem))?;
+    LOGO_TEXTURAS.get()?.contains_key(*key).then_some(*key)
+}
+
+/// Textura do logo (`branco` = pintada de branco para os cartões com gradiente).
+pub fn logo_textura(key: &str, branco: bool) -> Option<egui::TextureHandle> {
+    let map = LOGO_TEXTURAS.get()?;
+    let chave = if branco { format!("{key}-w") } else { key.to_owned() };
+    map.get(&chave).cloned()
+}
+
 pub fn install(ctx: &egui::Context) {
     use egui::{FontData, FontDefinitions};
     use std::sync::Arc;
@@ -154,7 +203,36 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(f);
     load_art(ctx);
     apply_theme(ctx, Theme::Light);
+    // Logos dos bancos: cor (mobile e modais) e branca (nos cartões com gradiente).
+    let mut map = HashMap::new();
+    for (key, bytes) in LOGOS {
+        let Ok(img) = image::load_from_memory(bytes) else { continue };
+        let size = [img.width() as usize, img.height() as usize];
+        let rgba = img.to_rgba8();
+        map.insert(
+            key.to_owned(),
+            ctx.load_texture(
+                format!("logo/{key}"),
+                egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                egui::TextureOptions::default(),
+            ),
+        );
+        let branca: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|p| [255u8, 255, 255, p[3]])
+            .collect();
+        map.insert(
+            format!("{key}-w"),
+            ctx.load_texture(
+                format!("logo/{key}-w"),
+                egui::ColorImage::from_rgba_unmultiplied(size, &branca),
+                egui::TextureOptions::default(),
+            ),
+        );
+    }
+    let _ = LOGO_TEXTURAS.set(map);
 }
+
 
 pub fn apply_theme(ctx: &egui::Context, theme: Theme) {
     let colors = theme.palette();

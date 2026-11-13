@@ -554,6 +554,19 @@ pub(crate) fn card_face(ui: &mut Ui, face: CardFace) -> egui::Response {
     let glow = p.with_clip_rect(rect.shrink(1.0));
     glow.circle_filled(rect.right_top() + vec2(-20.0, 10.0), 70.0, Color32::from_white_alpha(18));
     glow.circle_filled(rect.right_top() + vec2(-70.0, -20.0), 46.0, Color32::from_white_alpha(12));
+    // Marca d'água do banco: logo grande e translúcido no fundo do cartão (lado direito).
+    if let Some(key) = w::logo_key(&face.title)
+        && let Some(logo) = w::logo_textura(key, true)
+        && logo.size()[0] > 0
+    {
+        let altura = 92.0;
+        let largura = altura * logo.size()[0] as f32 / logo.size()[1] as f32;
+        let marca = Rect::from_min_size(
+            pos2(rect.right() - largura - 12.0, rect.center().y - altura / 2.0),
+            vec2(largura, altura),
+        );
+        glow.image(logo.id(), marca, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(70));
+    }
     if response.has_focus() {
         p.rect_stroke(rect.expand(3.0), CornerRadius::same(16), Stroke::new(2.0, colors.blue), egui::StrokeKind::Outside);
     }
