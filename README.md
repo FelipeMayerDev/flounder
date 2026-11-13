@@ -214,17 +214,24 @@ cargo zigbuild --release --locked --target x86_64-pc-windows-gnu
 
 O TAR.GZ gerado localmente herda a glibc da máquina de build; use o do CI (glibc 2.35) para distribuir.
 
-Em outra máquina (sem o repositório), coloque ao lado do executável um `flounder.env` só com o
-endereço do servidor e o token de quem vai usar — nunca o `backend/.env` inteiro, que tem as chaves
-do Pluggy:
+## Acesso (instalação nova, sem arquivo de configuração)
+
+O app novo já nasce apontando para o servidor. Quem instala digita **uma vez** o código de
+acesso fixo (`PAIRING_CODE_1`/`PAIRING_CODE_2` no `backend/.env` do servidor, um por membro,
+8+ caracteres) e o app guarda o token localmente — nunca mais pede nada. Os códigos também
+aparecem em Ajustes → **Acesso**, prontos para copiar e enviar junto com o link de download.
+
+Sem código configurado no servidor (ou para apontar a outro endereço), o `flounder.env` ao
+lado do executável continua funcionando como override:
 
 ```
 FLOUNDER_BACKEND_URL=https://finance.felipemayer.com.br
 APP_TOKEN_1=…
 ```
 
-O app procura, nesta ordem: `FLOUNDER_BACKEND_ENV`, o `backend/.env` do projeto e o `flounder.env`
-ao lado do executável.
+O app procura, nesta ordem: `FLOUNDER_BACKEND_ENV`, o `backend/.env` do projeto (máquina de
+desenvolvimento) e o `flounder.env` ao lado do executável. Sem nenhum deles, instalação de
+desenvolvimento usa o backend local e instalação empacotada usa o servidor.
 
 ## Estrutura
 

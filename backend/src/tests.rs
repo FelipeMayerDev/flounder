@@ -222,6 +222,7 @@ async fn setup_with(
         zai_token: None,
         zai_base: "https://api.z.ai/api/paas/v4".into(),
         zai_model: "glm-5.3".into(),
+        pairing_codes: [None, None],
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     (api, state, upstream)
@@ -430,6 +431,7 @@ async fn local_server_reports_missing_credentials_without_using_fake_upstream_da
         zai_token: None,
         zai_base: "https://api.z.ai/api/paas/v4".into(),
         zai_model: "glm-5.3".into(),
+        pairing_codes: [None, None],
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     let http = reqwest::Client::new();
@@ -1133,6 +1135,7 @@ async fn setup_with_zai(database: tokio_postgres::Config, calls: Arc<AtomicUsize
         zai_token: Some("zai-test-token".into()),
         zai_base: zai.url.clone(),
         zai_model: "glm-5.3".into(),
+        pairing_codes: [None, None],
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     (api, upstream, zai)
@@ -1233,4 +1236,150 @@ async fn assistant_keeps_reports_private_generates_once_and_chats_with_the_mock_
         assert_eq!(calls.load(Ordering::SeqCst), before);
     })
     .await;
+}
+
+async fn setup_pairing(codes: [Option<&str>; 2]) -> (Running, Arc<Mock>, Running) {
+    let state = Arc::new(Mock::default());
+    let upstream = spawn(Router::new().fallback(mock).with_state(state.clone())).await;
+    let config = Config {
+        client_id: "test-id".into(),
+        client_secret: "test-secret".into(),
+        tokens: [TOKEN_1.into(), TOKEN_2.into()],
+        pairing_codes: codes.map(|c| c.map(str::to_owned)),
+        bind: "127.0.0.1:3001".parse().unwrap(),
+        database: unused_database(),
+        institutions: None,
+        zai_token: None,
+        zai_base: "https://api.z.ai/api/paas/v4".into(),
+        zai_model: "glm-5.3".into(),
+    };
+    let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
+    (api, state, upstream)
+}
+
+#[tokio::test]
+async fn pair_exchanges_the_fixed_code_for_a_working_member_token() {
+    let (api, _state, _upstream) =
+        setup_pairing([None, Some("MARIA-2026-FLOUNDER")]).await;
+    let http = reqwest::Client::new();
+    // Minúsculas, espaços e traços: a comparação normaliza.
+    let value: Value = http
+        .post(format!("{}/api/pair", api.url))
+        .json(&json!({"code": "maria 2026 flounder"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(value["client"], "client-2");
+    assert_eq!(value["token"], TOKEN_2, "devolve o token do membro do código");
+    // O token devolvido autentica a API normalmente.
+    let authorized = http
+        .post(format!("{}/api/connect-token", api.url))
+        .bearer_auth(value["token"].as_str().unwrap())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    // Código errado: 401 claro.
+    let wrong = http
+        .post(format!("{}/api/pair", api.url))
+        .json(&json!({"code": "outra-coisa"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pair_throttles_repeated_wrong_codes() {
+    let (api, _state, _upstream) =
+        setup_pairing([Some("CODIGO-VALIDO-01"), None]).await;
+    let http = reqwest::Client::new();
+    let wrong = || async {
+        http.post(format!("{}/api/pair", api.url))
+            .json(&json!({"code": "errou"}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+    // As 19 primeiras falhas respondem 401; a 20ª atinge o limite e já devolve 429.
+    for _ in 0..19 {
+        assert_eq!(wrong().await, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(wrong().await, StatusCode::TOO_MANY_REQUESTS, "a falha que atinge o limite bloqueia");
+    assert_eq!(wrong().await, StatusCode::TOO_MANY_REQUESTS);
+    // Nem o código certo passa durante o bloqueio.
+    let correct = http
+        .post(format!("{}/api/pair", api.url))
+        .json(&json!({"code": "codigo-valido-01"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(correct.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn pairing_codes_are_visible_to_members_and_flagged_on_health() {
+    let (api, _state, _upstream) =
+        setup_pairing([Some("CODIGO-DO-UM"), Some("CODIGO-DO-DOIS")]).await;
+    let http = reqwest::Client::new();
+    let health: Value = http
+        .get(format!("{}/health", api.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["pairing"], true);
+    let anonymous = http
+        .get(format!("{}/api/pairing-code", api.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let codes: Value = http
+        .get(format!("{}/api/pairing-code", api.url))
+        .bearer_auth(TOKEN_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(codes["client-1"], "CODIGO-DO-UM");
+    assert_eq!(codes["client-2"], "CODIGO-DO-DOIS");
+}
+
+#[test]
+fn pairing_codes_must_be_long_distinct_and_different_from_tokens() {
+    let base: &[(&str, &str)] = &[
+        ("CLIENT_ID", "test-id"),
+        ("CLIENT_SECRET", "test-secret"),
+        ("APP_TOKEN_1", TOKEN_1),
+        ("APP_TOKEN_2", TOKEN_2),
+        ("DATABASE_URL", "host=127.0.0.1 port=1 user=none dbname=none"),
+    ];
+    let read = |overrides: &[(&str, &str)]| {
+        Config::read(
+            |name| {
+                overrides
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .or_else(|| base.iter().find(|(n, _)| *n == name))
+                    .map(|(_, v)| v.to_string())
+            },
+            false,
+        )
+    };
+    let ok = read(&[("PAIRING_CODE_2", "MARIA-2026-FLOUNDER")]).unwrap();
+    assert_eq!(ok.pairing_codes[1].as_deref(), Some("MARIA2026FLOUNDER"), "já vem normalizado");
+    assert!(read(&[("PAIRING_CODE_2", "curta")]).is_err(), "menos de 8 caracteres");
+    assert!(read(&[("PAIRING_CODE_1", "CODIGO-IGUAL"), ("PAIRING_CODE_2", "codigo-igual")]).is_err(), "iguais depois de normalizar");
+    assert!(read(&[("PAIRING_CODE_2", TOKEN_2)]).is_err(), "não pode ser o próprio token");
+    assert!(read(&[]).unwrap().pairing_codes.iter().all(Option::is_none), "sem variáveis, o pareamento fica desligado");
 }

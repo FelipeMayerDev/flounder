@@ -1341,3 +1341,52 @@ fn house_screen_splits_shared_bills_by_income() {
     hs.run();
     assert!(hs.query_by_label("Registrar acerto").is_some());
 }
+
+#[test]
+fn fresh_install_pairs_with_a_code_and_never_asks_again() {
+    use flounder::backend::PairMsg;
+    // Sem arquivo de config nenhum — nem o backend/.env de um checkout de desenvolvimento.
+    unsafe { std::env::set_var("FLOUNDER_BACKEND_ENV", "/não-existe/flounder.env"); }
+    let mut app = App::load(None);
+    let mut hs = harness(app, 1024.0, 700.0, 1.0);
+    assert!(hs.query_by_label_contains("Conectar ao servidor").is_some(), "instalação nova pede o código");
+    assert!(hs.query_by_label("Quem é você?").is_none());
+    // Código vazio: erro na hora, sem chamada.
+    hs.get_by_label("Conectar").click();
+    hs.run();
+    assert!(hs.query_by_label_contains("Informe o código").is_some());
+    // Resposta do servidor falsa: pareia como client-2 e entra direto no app.
+    let (tx, commands) = std::sync::mpsc::channel();
+    let (replies, rx) = std::sync::mpsc::channel();
+    let (pair_tx, pair_rx) = std::sync::mpsc::channel::<flounder::backend::PairMsg>();
+    hs.state_mut().remote.as_mut().unwrap().worker = Some(flounder::backend::Worker { client: "client-2".into(), tx, rx, pending: 0 });
+    fake_update_worker(hs.state_mut());
+    replies.send(Msg::State(Box::new(fake_state()), vec![])).unwrap();
+    hs.state_mut().pair.code = "MARIA-2026-FLOUNDER".into();
+    hs.state_mut().pair.sending = Some(pair_rx);
+    pair_tx.send(PairMsg::Paired { client: "client-2".into(), token: "token-pareado-2".into() }).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Conectar ao servidor").is_none(), "pareou: a tela de código some");
+    assert!(hs.query_by_label("Quem é você?").is_none(), "o código já diz quem é");
+    assert!(hs.query_all_by_label_contains("Saldo previsto").count() >= 1);
+    assert_eq!(hs.state().remote.as_ref().unwrap().member_token.as_deref(), Some("token-pareado-2"));
+    let mut storage = MemoryStorage::default();
+    eframe::App::save(hs.state_mut(), &mut storage);
+    assert_eq!(storage.0.get("member_client").map(String::as_str), Some("client-2"));
+    assert_eq!(storage.0.get("member_token").map(String::as_str), Some("token-pareado-2"), "o token fica guardado: nunca mais pede código");
+    // Erro do servidor: volta para a tela de código com a mensagem.
+    unsafe { std::env::remove_var("FLOUNDER_BACKEND_ENV"); }
+}
+
+#[test]
+fn access_card_shows_the_fixed_codes_to_send() {
+    let (state, entries) = rich_state();
+    let (mut hs, _replies, _commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().screen = flounder::app::Screen::Settings;
+    hs.state_mut().pair.codes = Some([Some("CODIGO-DO-UM".into()), None]);
+    hs.run();
+    assert!(hs.query_by_label_contains("Código fixo para conectar").is_some());
+    assert!(hs.query_by_label_contains("Ana: CODIGO-DO-UM").is_some());
+    assert!(hs.query_by_label_contains("Copiar código").is_some());
+    assert!(hs.query_by_label_contains("sem código no servidor").is_some(), "código ausente explica como definir");
+}

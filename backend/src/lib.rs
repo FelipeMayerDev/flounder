@@ -1,6 +1,7 @@
 mod local;
 mod db;
 mod assistant;
+mod pairing;
 #[allow(dead_code)] // Snapshot só é usado pelo desktop.
 #[path = "../../shared/cards.rs"]
 mod connected;
@@ -27,10 +28,14 @@ use tokio::sync::Mutex;
 
 type ApiResult = Result<Json<Value>, ApiError>;
 
+const CLIENTS: [&str; 2] = ["client-1", "client-2"];
+
 pub struct Config {
     client_id: String,
     client_secret: String,
     tokens: [String; 2],
+    /// Códigos fixos de pareamento (`PAIRING_CODE_N`, já normalizados); `None` = desligado.
+    pairing_codes: [Option<String>; 2],
     bind: std::net::SocketAddr,
     database: tokio_postgres::Config,
     /// Modo local: `backend/.local/institutions.json` (item → banco) para o proxy MeuPluggy.
@@ -92,6 +97,9 @@ impl Config {
                 required("CLIENT_SECRET")?
             },
             tokens: [required("APP_TOKEN_1")?, required("APP_TOKEN_2")?],
+            pairing_codes: [lookup("PAIRING_CODE_1"), lookup("PAIRING_CODE_2")].map(|code| {
+                code.map(|s| pairing::normalize(&s)).filter(|s| !s.is_empty() && !s.starts_with("replace_"))
+            }),
             bind,
             database,
             institutions: None,
@@ -115,6 +123,20 @@ impl Config {
         {
             return Err("APP_TOKEN_1 e APP_TOKEN_2 devem ser diferentes e ter pelo menos 32 caracteres sem espaços.".into());
         }
+        for (n, code) in [("PAIRING_CODE_1", &config.pairing_codes[0]), ("PAIRING_CODE_2", &config.pairing_codes[1])] {
+            if let Some(code) = code
+                && (code.len() < 8
+                    || !code.is_ascii()
+                    || config.tokens.iter().any(|token| pairing::normalize(token) == *code))
+            {
+                return Err(format!("{n} precisa de pelo menos 8 caracteres (sem acentos) e ser diferente dos APP_TOKEN_*."));
+            }
+        }
+        if let (Some(a), Some(b)) = (&config.pairing_codes[0], &config.pairing_codes[1])
+            && a == b
+        {
+            return Err("PAIRING_CODE_1 e PAIRING_CODE_2 devem ser diferentes.".into());
+        }
         Ok(config)
     }
 
@@ -126,6 +148,9 @@ impl Config {
     }
     pub fn assistant_configured(&self) -> bool {
         self.zai_token.is_some()
+    }
+    pub fn pairing_configured(&self) -> bool {
+        self.pairing_codes.iter().any(Option::is_some)
     }
 }
 
@@ -139,6 +164,8 @@ struct Backend {
     sync: Mutex<()>,
     /// Serializa a geração de análises do assistente.
     assist: Mutex<()>,
+    /// Tentativas erradas de código de pareamento (pairing.rs).
+    pair_throttle: Mutex<pairing::Throttle>,
 }
 
 struct Pluggy {
@@ -191,6 +218,7 @@ fn build_router(
         db: Mutex::new(client),
         sync: Mutex::new(()),
         assist: Mutex::new(()),
+        pair_throttle: Mutex::new(pairing::Throttle::default()),
     });
     assistant::spawn_daily(state.clone());
     db::spawn_sync_loop(state.clone());
@@ -213,6 +241,7 @@ fn build_router(
         .route("/api/settings", put(db::put_settings))
         .route("/api/assistant/reports", get(assistant::get_reports))
         .route("/api/assistant/refresh", post(assistant::post_refresh))
+        .route("/api/pairing-code", get(pairing::codes))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
     // A conversa pode levar o histórico inteiro: corpo maior só nela.
     let chat = Router::new()
@@ -241,9 +270,11 @@ fn build_router(
                     "status": "ok",
                     "pluggyConfigured": state.config.pluggy_configured(),
                     "assistant": state.config.assistant_configured(),
+                    "pairing": state.config.pairing_configured(),
                 }))
             }),
         )
+        .route("/api/pair", post(pairing::pair))
         .merge(private)
         .merge(chat)
         .with_state(state)
@@ -275,7 +306,7 @@ async fn authorize(
     };
     request
         .extensions_mut()
-        .insert(User(["client-1", "client-2"][index]));
+        .insert(User(CLIENTS[index]));
     next.run(request).await
 }
 

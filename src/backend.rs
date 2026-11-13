@@ -14,7 +14,6 @@ const POLL: Duration = Duration::from_secs(5);
 const SYNC_TIMEOUT: Duration = Duration::from_secs(90);
 /// O GLM pensa antes de responder: conversa e análises têm folga.
 const ASSISTANT_TIMEOUT: Duration = Duration::from_secs(150);
-const RUN_LOCAL: &str = "Execute backend/run-local.sh e tente novamente.";
 const UNEXPECTED: &str = "Resposta inesperada do backend.";
 
 pub enum Msg {
@@ -72,11 +71,11 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(client: String, ctx: egui::Context) -> Worker {
+    pub fn start(client: String, token: String, base: String, ctx: egui::Context) -> Worker {
         let (tx, commands) = mpsc::channel();
         let (replies, rx) = mpsc::channel();
         let worker = Worker { client: client.clone(), tx, rx, pending: 0 };
-        std::thread::spawn(move || run(&client, &ctx, &replies, &commands));
+        std::thread::spawn(move || run(&token, &base, &ctx, &replies, &commands));
         worker
     }
 
@@ -86,18 +85,13 @@ impl Worker {
     }
 }
 
-fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Receiver<Cmd>) {
+fn run(token: &str, base: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Receiver<Cmd>) {
     let send = |m| {
         let _ = replies.send(m);
         ctx.request_repaint();
     };
-    let token = match token(client) {
-        Ok(t) => t,
-        Err(e) => return send(Msg::Offline(e)),
-    };
-    let base = base_url();
-    let base = base.trim_end_matches('/');
     let auth = format!("Bearer {token}");
+    let base = base.trim_end_matches('/');
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(5))).build().into();
     let slow: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(SYNC_TIMEOUT)).build().into();
     let ai: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(ASSISTANT_TIMEOUT)).build().into();
@@ -282,37 +276,34 @@ fn run(client: &str, ctx: &egui::Context, replies: &Sender<Msg>, commands: &Rece
 /// Mensagem em português; nunca inclui o token.
 fn describe(e: ureq::Error, base: &str) -> String {
     match e {
-        ureq::Error::StatusCode(401) => "O backend recusou o token deste membro (backend/.env).".into(),
+        ureq::Error::StatusCode(401) => "O backend recusou o token deste membro.".into(),
         ureq::Error::StatusCode(code) => format!("O backend respondeu com erro {code}."),
-        _ => format!("Não foi possível conectar ao backend em {base}. {RUN_LOCAL}"),
+        _ => format!("Não foi possível conectar ao backend em {base}. Confira a internet e tente de novo."),
     }
 }
 
-/// Abre no navegador a página /connect já com o token de `client` (no fragmento, que não vai
-/// ao servidor; a página o apaga do endereço).
+/// Abre no navegador a página /connect já com o token (no fragmento, que não vai ao
+/// servidor; a página o apaga do endereço).
 // ponytail: o token aparece por instantes na linha de comando do xdg-open/navegador, visível a outros
 // usuários desta máquina; ok para o uso pessoal local. Windows não tem abridor aqui.
-pub fn open_connect(client: &str) -> Result<(), String> {
-    let base = base_url();
-    let url = format!("{}/connect#token={}", base.trim_end_matches('/'), token(client)?);
+pub fn open_connect(base: &str, token: &str) -> Result<(), String> {
+    let base = base.trim_end_matches('/');
+    let url = format!("{base}/connect#token={token}");
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(opener).arg(url).spawn().map(drop)
         .map_err(|_| format!("Não foi possível abrir o navegador. Abra {base}/connect e informe o token."))
 }
 
-/// `client-N` → valor de `APP_TOKEN_N`, lendo só essa linha do `backend/.env` local.
-// ponytail: modo local lê o .env do backend desta máquina; no servidor, cada máquina precisa de configuração própria do token.
-fn token(client: &str) -> Result<String, String> {
-    let n = client.strip_prefix("client-").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .ok_or_else(|| format!("Membro desconhecido: {client}."))?;
-    let path = env_path();
-    let missing = || format!("Não foi possível ler APP_TOKEN_{n} em {}. {RUN_LOCAL}", path.display());
-    let text = std::fs::read_to_string(&path).map_err(|_| missing())?;
-    find_token(&text, n).ok_or_else(missing)
+/// `client-N` → valor de `APP_TOKEN_N` no arquivo de config (dev ou `flounder.env`).
+/// Instalação pareada não passa por aqui: o token guardado vence.
+pub(crate) fn env_token(client: &str) -> Option<String> {
+    let n = client.strip_prefix("client-").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))?;
+    let text = std::fs::read_to_string(env_path()).ok()?;
+    find_token(&text, n)
 }
 
 /// `FLOUNDER_BACKEND_ENV`, senão o `backend/.env` do projeto (máquina de desenvolvimento), senão
-/// `flounder.env` ao lado do executável ou do .AppImage (outra máquina: só tokens e endereço).
+/// `flounder.env` ao lado do executável ou do .AppImage (outra máquina: opcional, só endereço).
 fn env_path() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("FLOUNDER_BACKEND_ENV") {
         return path.into();
@@ -327,13 +318,103 @@ fn env_path() -> std::path::PathBuf {
     }
 }
 
-/// Endereço do backend: variável `FLOUNDER_BACKEND_URL`, senão a mesma chave no `.env` local
-/// (aponta o app para o servidor sem mexer no atalho), senão o backend local.
-fn base_url() -> String {
+/// Máquina de desenvolvimento (o `backend/.env` do projeto existe): o padrão é o backend local.
+fn dev_checkout() -> bool {
+    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env")).exists()
+}
+
+/// Endereço do backend: variável `FLOUNDER_BACKEND_URL`, senão a mesma chave no arquivo de
+/// config (se houver), senão o backend local (máquina de desenvolvimento) ou o servidor —
+/// instalação nova não precisa de arquivo nenhum para achar o servidor.
+pub fn base_url() -> String {
     let url = std::env::var("FLOUNDER_BACKEND_URL").ok()
         .or_else(|| env_value(&std::fs::read_to_string(env_path()).ok()?, "FLOUNDER_BACKEND_URL"))
-        .unwrap_or_else(|| "http://127.0.0.1:3001".into());
+        .unwrap_or_else(|| if dev_checkout() { "http://127.0.0.1:3001".into() } else { SERVIDOR.into() });
     url.trim_end_matches('/').to_string()
+}
+
+/// O servidor de vocês, onde o app novo procura conexão sem configuração nenhuma.
+pub const SERVIDOR: &str = "https://finance.felipemayer.com.br";
+
+/// Pareamento: troca o código de acesso fixo pelo token do membro, numa thread própria.
+/// O resultado chega pelo receiver (com repaint); sucesso é guardado pelo app.
+pub enum PairMsg {
+    Paired { client: String, token: String },
+    Failed(String),
+}
+
+pub fn send_pair(base: &str, code: &str, ctx: egui::Context) -> Receiver<PairMsg> {
+    let (replies, rx) = mpsc::channel();
+    let base = base.trim_end_matches('/').to_owned();
+    let code = code.trim().to_owned();
+    std::thread::spawn(move || {
+        let send = |m| {
+            let _ = replies.send(m);
+            ctx.request_repaint();
+        };
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
+        let result = agent
+            .post(format!("{base}/api/pair"))
+            .header("Content-Type", "application/json")
+            .send(&format!(r#"{{"code":{}}}"#, serde_json::to_string(&code).expect("código serializa")))
+            .and_then(|mut r| r.body_mut().read_to_string())
+            .map_err(|e| match e {
+                ureq::Error::StatusCode(401) => "Código de acesso inválido.".into(),
+                ureq::Error::StatusCode(429) => "Muitas tentativas de código. Tente novamente mais tarde.".into(),
+                _ => format!("Não foi possível conectar ao servidor em {base}."),
+            })
+            .and_then(|body| {
+                let value: serde_json::Value = serde_json::from_str(&body)
+                    .map_err(|_| "Resposta inesperada do servidor.".to_owned())?;
+                let field = |name: &str| {
+                    value[name].as_str().filter(|s| !s.is_empty())
+                        .ok_or_else(|| "Resposta inesperada do servidor.".to_owned())
+                        .map(str::to_owned)
+                };
+                Ok((field("client")?, field("token")?))
+            });
+        match result {
+            Ok((client, token)) => send(PairMsg::Paired { client, token }),
+            Err(e) => send(PairMsg::Failed(e)),
+        }
+    });
+    rx
+}
+
+/// Os códigos fixos configurados no servidor (`[client-1, client-2]`), para o card de Ajustes.
+pub enum CodesMsg {
+    Loaded([Option<String>; 2]),
+    Failed(String),
+}
+
+pub fn fetch_pairing_codes(base: &str, token: &str, ctx: egui::Context) -> Receiver<CodesMsg> {
+    let (replies, rx) = mpsc::channel();
+    let base = base.trim_end_matches('/').to_owned();
+    let auth = format!("Bearer {token}");
+    std::thread::spawn(move || {
+        let send = |m| {
+            let _ = replies.send(m);
+            ctx.request_repaint();
+        };
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
+        let result = agent
+            .get(format!("{base}/api/pairing-code"))
+            .header("Authorization", &auth)
+            .call()
+            .and_then(|mut r| r.body_mut().read_to_string())
+            .map_err(|_| "Não foi possível consultar os códigos no servidor.".to_owned())
+            .and_then(|body| {
+                let value: serde_json::Value = serde_json::from_str(&body)
+                    .map_err(|_| "Resposta inesperada do servidor.".to_owned())?;
+                let code = |client: &str| value[client].as_str().map(str::to_owned);
+                Ok([code("client-1"), code("client-2")])
+            });
+        match result {
+            Ok(codes) => send(CodesMsg::Loaded(codes)),
+            Err(e) => send(CodesMsg::Failed(e)),
+        }
+    });
+    rx
 }
 
 fn find_token(env: &str, n: &str) -> Option<String> {
@@ -426,6 +507,7 @@ mod tests {
         assert_eq!(find_token(env, "1").as_deref(), Some("one"));
         assert_eq!(find_token(env, "2").as_deref(), Some("two"));
         assert_eq!(find_token(env, "3"), None);
-        assert!(token("admin").is_err());
+        assert_eq!(env_token("client-9"), None, "membro inválido não procura arquivo");
+        assert_eq!(env_token("admin"), None);
     }
 }

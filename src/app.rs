@@ -181,6 +181,10 @@ impl Form {
 pub struct Remote {
     /// `client-N` de quem usa este computador; `None` até responder "Quem é você?".
     pub me: Option<String>,
+    /// Token do membro pareado (instalação nova, sem arquivo de config); guardado no storage.
+    pub member_token: Option<String>,
+    /// Instalação nova sem credencial nenhuma: a tela de pareamento resolve antes de conectar.
+    pub pairing: bool,
     pub members: Vec<crate::api::Member>,
     pub loaded: bool,
     /// Falha ao buscar o estado; some na próxima busca bem-sucedida.
@@ -193,6 +197,31 @@ pub struct Remote {
     pub syncing: bool,
     /// Resultado da última atualização das contas; `true` = houve falha.
     pub sync_note: Option<(String, bool)>,
+}
+
+impl Remote {
+    /// Token deste membro: o pareado (se for ele) vence; senão, o do arquivo de config.
+    pub fn token_for(&self, client: &str) -> Option<String> {
+        let paired = self
+            .member_token
+            .clone()
+            .filter(|_| self.me.as_deref() == Some(client));
+        paired.or_else(|| crate::backend::env_token(client))
+    }
+}
+
+/// Primeira conexão de uma instalação nova: troca o código de acesso pelo token do membro.
+#[derive(Default)]
+pub struct Pair {
+    pub code: String,
+    pub tried: bool,
+    pub error: Option<String>,
+    /// Chamada `POST /api/pair` em andamento.
+    pub sending: Option<std::sync::mpsc::Receiver<crate::backend::PairMsg>>,
+    /// Códigos fixos do servidor (`[client-1, client-2]`) para o card de Acesso.
+    pub codes: Option<[Option<String>; 2]>,
+    pub codes_error: Option<String>,
+    pub codes_fetching: Option<std::sync::mpsc::Receiver<crate::backend::CodesMsg>>,
 }
 
 /// Verificação e download da próxima versão. Worker criado no primeiro quadro (só com
@@ -226,6 +255,8 @@ pub struct App {
     pub remote: Option<Remote>,
     /// Atualização automática (AppImage e Windows).
     pub update: Update,
+    /// Pareamento de instalação nova (código de acesso → token).
+    pub pair: Pair,
     /// Atualiza as contas uma vez depois da primeira carga (só com backend).
     pub auto_sync: bool,
     pub flow: crate::screens::Flow,
@@ -256,6 +287,7 @@ impl App {
             extra: Default::default(),
             remote: None,
             update: Update::default(),
+            pair: Pair::default(),
             auto_sync: false,
             flow: Default::default(),
             data: Data::demo(),
@@ -276,7 +308,11 @@ impl App {
         let mut app = Self::new();
         app.data = Data::empty();
         app.connected_cards = Some(Vec::new());
-        app.remote = Some(Remote { me: storage.and_then(|s| s.get_string("member_client")), ..Remote::default() });
+        app.remote = Some(Remote {
+            me: storage.and_then(|s| s.get_string("member_client")),
+            member_token: storage.and_then(|s| s.get_string("member_token")),
+            ..Remote::default()
+        });
         app.auto_sync = true;
         if let Some(key) = storage.and_then(|s| s.get_string("theme")) {
             app.theme = Theme::from_key(&key);
@@ -305,7 +341,20 @@ impl App {
     /// formulário aberto é descartado: a próxima busca (5 s) já traz tudo.
     fn sync(&mut self, ctx: &egui::Context) {
         let Some(r) = &mut self.remote else { return };
-        let w = r.worker.get_or_insert_with(|| Worker::start(r.me.clone().unwrap_or_else(|| "client-1".into()), ctx.clone()));
+        // Sem worker ainda, resolve a credencial: pareada, do arquivo, ou pareamento novo.
+        let w = match r.worker.as_mut() {
+            Some(w) => w,
+            None => {
+                let client = r.me.clone().unwrap_or_else(|| "client-1".into());
+                let Some(token) = r.token_for(&client) else {
+                    // Instalação nova sem credencial nenhuma: a tela de código resolve.
+                    r.pairing = true;
+                    return;
+                };
+                r.pairing = false;
+                r.worker.insert(Worker::start(client, token, crate::backend::base_url(), ctx.clone()))
+            }
+        };
         let mut latest = None;
         while let Ok(msg) = w.rx.try_recv() {
             match msg {
@@ -365,6 +414,80 @@ impl App {
                 }
                 crate::update::Msg::Ready { version, path } => u.state = crate::update::UpdateState::Ready { version, path },
                 crate::update::Msg::Failed(e) => u.state = crate::update::UpdateState::Failed(e),
+            }
+        }
+    }
+
+    /// Recebe a resposta do pareamento (código → token) e, no sucesso, conecta direto.
+    fn poll_pair(&mut self) {
+        let Some(rx) = self.pair.sending.take() else { return };
+        let mut paired = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                crate::backend::PairMsg::Paired { client, token } => paired = Some((client, token)),
+                crate::backend::PairMsg::Failed(e) => {
+                    self.pair.error = Some(e);
+                    self.pair.tried = true;
+                }
+            }
+        }
+        match paired {
+            Some((client, token)) => {
+                self.pair.code.clear();
+                self.pair.tried = false;
+                self.pair.error = None;
+                if let Some(r) = &mut self.remote {
+                    r.me = Some(client);
+                    r.member_token = Some(token);
+                    r.pairing = false;
+                    r.offline = None;
+                }
+            }
+            // Ainda conectando: devolve o receiver para o próximo quadro.
+            None if self.pair.error.is_none() => self.pair.sending = Some(rx),
+            None => {}
+        }
+    }
+
+    /// Tela de pareamento: instalação nova sem credencial nenhuma.
+    fn pairing_screen(&mut self, ui: &mut Ui) {
+        let colors = w::palette(ui.ctx());
+        let mut submit = false;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(colors.bg).inner_margin(24))
+            .show(ui, |ui| {
+                w::card(ui, ROOMY, |ui| {
+                    ui.vertical_centered(|ui| {
+                        w::art(ui, w::Art::Fish, 80.0);
+                        w::text(ui, "Conectar ao servidor", w::bold(20.0), colors.text);
+                        w::caption(ui, "Cole o código de acesso que quem te convidou mandou. Ele fica guardado neste computador — isso aqui é uma vez só.");
+                        ui.add_space(w::GROUP_GAP);
+                        if self.pair.sending.is_some() {
+                            w::caption(ui, format!("{} Conectando…", icon::HOURGLASS));
+                        } else {
+                            w::field(ui, "Código de acesso", None, |ui| {
+                                let response = ui.add(w::text_input(&mut self.pair.code, "Ex.: MARIA-2026-FLOUNDER"));
+                                if self.pair.code.is_empty() {
+                                    response.request_focus();
+                                }
+                                response
+                            });
+                            if let Some(error) = &self.pair.error {
+                                w::text(ui, error.clone(), w::regular(13.0), colors.red);
+                            }
+                            ui.add_space(w::GROUP_GAP);
+                            submit = w::primary_button(ui, "Conectar").clicked();
+                        }
+                    });
+                });
+            });
+        if submit {
+            self.pair.tried = true;
+            if self.pair.code.trim().is_empty() {
+                self.pair.error = Some("Informe o código de acesso.".into());
+            } else {
+                self.pair.error = None;
+                self.pair.sending = Some(crate::backend::send_pair(&crate::backend::base_url(), &self.pair.code, ui.ctx().clone()));
             }
         }
     }
@@ -429,7 +552,11 @@ impl App {
     /// Recomeça a sincronização do zero (outra pessoa ou nova tentativa).
     fn restart(&mut self) {
         if let Some(r) = &mut self.remote {
-            *r = Remote { me: r.me.take(), ..Remote::default() };
+            *r = Remote {
+                me: r.me.take(),
+                member_token: r.member_token.clone(),
+                ..Remote::default()
+            };
         }
         // Ids locais mudam com a nova thread.
         self.form = None;
@@ -556,8 +683,12 @@ impl App {
             w::apply_theme(ui.ctx(), self.theme);
             ui.set_style(ui.ctx().global_style());
         }
+        self.poll_pair();
         self.sync(ui.ctx());
         self.poll_update(ui.ctx());
+        if self.remote.as_ref().is_some_and(|r| r.pairing) {
+            return self.pairing_screen(ui);
+        }
         if self.remote.as_ref().is_some_and(|r| !r.loaded || r.me.is_none()) {
             return self.connecting(ui);
         }
@@ -1051,8 +1182,14 @@ impl App {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        if let Some(client) = self.remote.as_ref().and_then(|r| r.me.clone()) {
-            storage.set_string("member_client", client);
+        if let Some(r) = self.remote.as_ref() {
+            if let Some(client) = &r.me {
+                storage.set_string("member_client", client.clone());
+            }
+            // Token do pareamento: vai junto com o membro, para não pedir código de novo.
+            if let Some(token) = &r.member_token {
+                storage.set_string("member_token", token.clone());
+            }
         }
         storage.set_string("theme", self.theme.key().to_owned());
         storage.set_string("dashboard_layout", self.dashboard_layout.encode());

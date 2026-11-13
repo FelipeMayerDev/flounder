@@ -5,8 +5,11 @@ COMO ABRIR
   Windows: extraia o ZIP e abra flounder.exe.
   Linux:   tar -xzf flounder-*-linux-x86_64.tar.gz && ./flounder-*/flounder
 
-  Na primeira abertura, o app pergunta "Quem é você?" e mostra os dois nomes do casal.
-  A escolha fica salva; para trocar, use Ajustes → Quem usa este computador.
+  Na primeira abertura, o app pede o CÓDIGO DE ACESSO (quem te convidou manda junto com
+  este pacote). Digite uma vez: o app guarda a conexão e nunca mais pede nada.
+  Em máquinas com backend local (desenvolvimento), em vez do código vale o backend/.env.
+  Sem código nem arquivo, o app pergunta "Quem é você?" e mostra os dois nomes do casal;
+  a escolha fica salva e para trocar use Ajustes → Quem usa este computador.
   Se o backend não responder, o app explica o problema e oferece "Tentar novamente".
   O app lê APP_TOKEN_1/APP_TOKEN_2 do backend/.env local (outro caminho:
   FLOUNDER_BACKEND_ENV) e acessa http://127.0.0.1:3001 (outro endereço:

@@ -15,7 +15,7 @@ pub(crate) fn values(path: &Path) -> Result<HashMap<String, String>, String> {
                 .map_err(|_| "Não foi possível gerar os tokens locais.".to_owned())?;
             let token = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
             let contents = format!(
-                "# Credenciais Pluggy: preencha localmente, sem enviar no chat.\nCLIENT_ID=\nCLIENT_SECRET=\nAPP_TOKEN_1={}\nAPP_TOKEN_2={}\nBIND_ADDR=127.0.0.1:3001\n# PostgreSQL do docker compose; a senha é POSTGRES_PASSWORD do .env da raiz.\n# DATABASE_URL=host=127.0.0.1 port=5433 user=flounder dbname=flounder password=…\nDATABASE_URL=\n",
+                "# Credenciais Pluggy: preencha localmente, sem enviar no chat.\nCLIENT_ID=\nCLIENT_SECRET=\nAPP_TOKEN_1={}\nAPP_TOKEN_2={}\nBIND_ADDR=127.0.0.1:3001\n# Código fixo de pareamento (opcional): quem tem ele conecta o app novo, sem flounder.env.\nPAIRING_CODE_1=\nPAIRING_CODE_2=\n# PostgreSQL do docker compose; a senha é POSTGRES_PASSWORD do .env da raiz.\n# DATABASE_URL=host=127.0.0.1 port=5433 user=flounder dbname=flounder password=…\nDATABASE_URL=\n",
                 token(&random[..32]),
                 token(&random[32..]),
             );
@@ -52,6 +52,8 @@ fn parse(contents: &str) -> Result<HashMap<String, String>, String> {
             "APP_TOKEN_2",
             "BIND_ADDR",
             "DATABASE_URL",
+            "PAIRING_CODE_1",
+            "PAIRING_CODE_2",
         ]
         .contains(&name)
         {

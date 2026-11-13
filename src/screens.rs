@@ -1161,7 +1161,68 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
     if refresh {
         app.refresh();
     }
+    access_card(app, ui);
     update_card(app, ui);
+}
+
+// ───────────────────────── Acesso ─────────────────────────
+
+/// Códigos fixos de pareamento do servidor: mande com o link de download para quem vai
+/// usar o app num computador novo — a pessoa digita uma vez e nunca mais configura nada.
+fn access_card(app: &mut App, ui: &mut Ui) {
+    let Some(client) = app.remote.as_ref().and_then(|r| r.me.clone()) else { return };
+    // Busca os códigos uma vez por sessão, quando o card aparece.
+    if app.pair.codes.is_none() && app.pair.codes_error.is_none() && app.pair.codes_fetching.is_none()
+        && let Some(token) = app.remote.as_ref().and_then(|r| r.token_for(&client))
+    {
+        app.pair.codes_fetching = Some(crate::backend::fetch_pairing_codes(&crate::backend::base_url(), &token, ui.ctx().clone()));
+    }
+    if let Some(rx) = app.pair.codes_fetching.take() {
+        let mut loaded = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                crate::backend::CodesMsg::Loaded(codes) => loaded = Some(codes),
+                crate::backend::CodesMsg::Failed(e) => {
+                    app.pair.codes_error = Some(e);
+                }
+            }
+        }
+        match loaded {
+            Some(codes) => app.pair.codes = Some(codes),
+            // Ainda buscando: devolve o receiver para o próximo quadro.
+            None if app.pair.codes_error.is_none() => app.pair.codes_fetching = Some(rx),
+            None => {}
+        }
+    }
+    let colors = w::palette(ui.ctx());
+    let names = app.data.names.clone();
+    let (codes, error) = (app.pair.codes.clone(), app.pair.codes_error.clone());
+    w::card(ui, NORMAL, |ui| {
+        w::title(ui, "Acesso");
+        w::caption(ui, "Código fixo para conectar o app num computador novo: mande o link de download junto com o código de quem vai usar, e a pessoa digita uma vez só.");
+        ui.add_space(w::GROUP_GAP);
+        if let Some(codes) = codes {
+            for (i, code) in codes.iter().enumerate() {
+                match code {
+                    Some(code) => {
+                        ui.horizontal(|ui| {
+                            w::text(ui, format!("{}: {}", names.get(i).map(String::as_str).unwrap_or("Pessoa"), code), w::semibold(14.0), colors.text);
+                            if w::icon_button(ui, icon::COPY, "Copiar código").clicked() {
+                                ui.ctx().copy_text(code.clone());
+                            }
+                        });
+                    }
+                    None => {
+                        w::caption(ui, format!("{}: sem código no servidor (defina PAIRING_CODE_{} no backend/.env).", names.get(i).map(String::as_str).unwrap_or("Pessoa"), i + 1));
+                    }
+                }
+            }
+        } else if let Some(error) = error {
+            w::text(ui, error, w::regular(13.0), colors.red);
+        } else {
+            w::caption(ui, format!("{} Buscando os códigos…", icon::HOURGLASS));
+        }
+    });
 }
 
 // ───────────────────────── Atualização ─────────────────────────
@@ -1255,9 +1316,14 @@ fn synced(iso: Option<&str>) -> String {
 fn connect_button(app: &mut App, ui: &mut Ui) {
     let Some(r) = app.remote.as_mut() else { return };
     let Some(client) = r.me.clone() else { return };
-    if ui.button(format!("{} Conectar banco ou cartão", icon::PLUS)).clicked()
-        && let Err(e) = crate::backend::open_connect(&client)
-    {
+    let clicked = ui.button(format!("{} Conectar banco ou cartão", icon::PLUS)).clicked();
+    let Some(token) = r.token_for(&client) else {
+        if clicked {
+            r.failed = Some("Não há token de acesso deste membro neste computador.".into());
+        }
+        return;
+    };
+    if clicked && let Err(e) = crate::backend::open_connect(&crate::backend::base_url(), &token) {
         r.failed = Some(e);
     }
 }

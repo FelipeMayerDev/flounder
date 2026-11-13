@@ -6,7 +6,7 @@ use crate::app::App;
 use crate::backend::Cmd;
 use crate::model::local_time;
 use crate::widgets::{self as w};
-use egui::{pos2, vec2, Align, Align2, Color32, CornerRadius, Id, Layout, Sense, Stroke, Ui, Vec2};
+use egui::{pos2, vec2, Align, Align2, CornerRadius, Id, Layout, Sense, Stroke, Ui, Vec2};
 use egui_phosphor::regular as icon;
 use std::time::{Duration, Instant};
 
