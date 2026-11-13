@@ -10,10 +10,10 @@ use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     // Dias sempre em ordem crescente (o FAB já ordena, mas por garantia).
-    app.mock.fluxo.sort_by_key(|d| d.dia);
+    app.dados.fluxo.sort_by_key(|d| d.dia);
 
     // Mês aberto sem nenhum lançamento.
-    if app.mock.fluxo.is_empty() {
+    if app.dados.fluxo.is_empty() {
         theme::vazio(ui, "🐟", "Nenhum lançamento neste mês.");
         return;
     }
@@ -24,7 +24,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let mut alternar: Vec<(usize, usize)> = Vec::new();
     dias(ui, app, &mut alternar);
     for (i, j) in alternar {
-        let e = &mut app.mock.fluxo[i].entradas[j];
+        let e = &mut app.dados.fluxo[i].entradas[j];
         e.paid = !e.paid;
     }
 }
@@ -32,7 +32,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
 /// Cartão-resumo "Fluxo de caixa" do mês: entradas, saídas e saldo.
 fn resumo(ui: &mut egui::Ui, app: &MobileApp) {
     let c = theme::cores();
-    let (entradas, saidas) = totais(&app.mock.fluxo);
+    let (entradas, saidas) = totais(&app.dados.fluxo);
     let saldo = entradas - saidas;
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
@@ -80,9 +80,9 @@ fn totais(fluxo: &[DiaFluxo]) -> (i64, i64) {
 
 /// Um cartão por dia; guarda os índices das linhas tocadas.
 fn dias(ui: &mut egui::Ui, app: &MobileApp, alternar: &mut Vec<(usize, usize)>) {
-    for i in 0..app.mock.fluxo.len() {
-        let dia = app.mock.fluxo[i].dia;
-        let saldo_dia: i64 = app.mock.fluxo[i].entradas.iter().map(|e| e.centavos).sum();
+    for i in 0..app.dados.fluxo.len() {
+        let dia = app.dados.fluxo[i].dia;
+        let saldo_dia: i64 = app.dados.fluxo[i].entradas.iter().map(|e| e.centavos).sum();
         theme::card(ui, |ui| {
             let c = theme::cores();
             // Cabeçalho do dia: rótulo à esquerda, saldo à direita.
@@ -94,7 +94,7 @@ fn dias(ui: &mut egui::Ui, app: &MobileApp, alternar: &mut Vec<(usize, usize)>) 
                 });
             });
             ui.add_space(8.0);
-            for j in 0..app.mock.fluxo[i].entradas.len() {
+            for j in 0..app.dados.fluxo[i].entradas.len() {
                 if j > 0 {
                     divisor(ui);
                 }
@@ -116,7 +116,7 @@ fn divisor(ui: &mut egui::Ui) {
 /// Uma entrada do fluxo; tocar na linha alterna pago (guardado em `alternar`).
 fn linha(ui: &mut egui::Ui, i: usize, j: usize, app: &MobileApp, alternar: &mut Vec<(usize, usize)>) {
     let c = theme::cores();
-    let e = &app.mock.fluxo[i].entradas[j];
+    let e = &app.dados.fluxo[i].entradas[j];
     let receita = e.centavos >= 0;
     let (glifo, cor_valor, suave) = if receita {
         (icon::ARROW_UP_RIGHT, c.green, c.green_soft)

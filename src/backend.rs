@@ -296,7 +296,7 @@ pub fn open_connect(base: &str, token: &str) -> Result<(), String> {
 
 /// `client-N` → valor de `APP_TOKEN_N` no arquivo de config (dev ou `flounder.env`).
 /// Instalação pareada não passa por aqui: o token guardado vence.
-pub(crate) fn env_token(client: &str) -> Option<String> {
+pub fn env_token(client: &str) -> Option<String> {
     let n = client.strip_prefix("client-").filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))?;
     let text = std::fs::read_to_string(env_path()).ok()?;
     find_token(&text, n)

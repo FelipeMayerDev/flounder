@@ -1,6 +1,7 @@
 //! Flounder mobile: casca egui para celular (fase 1 com mock; fase 2 na API do backend).
 
 pub mod app;
+pub mod converter;
 pub mod mock;
 pub mod screens;
 pub mod theme;
@@ -8,7 +9,7 @@ pub mod theme;
 /// Cria o app (compartilhado entre desktop e Android).
 pub fn criar(cc: &eframe::CreationContext<'_>) -> Box<dyn eframe::App> {
     flounder::widgets::install(&cc.egui_ctx);
-    Box::new(app::MobileApp::new())
+    Box::new(app::MobileApp::load(cc.storage))
 }
 
 /// Android: NativeActivity chama este símbolo no `.so` (crate-type cdylib).

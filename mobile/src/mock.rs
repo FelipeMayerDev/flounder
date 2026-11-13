@@ -77,6 +77,8 @@ pub struct Casa {
 }
 
 pub struct ContaCasa {
+    /// Id local da entrada (fase 2: alterna paga e grava via worker).
+    pub id: u32,
     pub nome: String,
     pub dia: u8,
     pub total_cents: i64,
@@ -177,13 +179,13 @@ fn dezembro() -> Mes {
             pendentes_qtd: 7,
             pendentes_total_cents: 1_533_244,
             bills: vec![
-                ContaCasa { nome: "Apartamento Vila Mariana".into(), dia: 1, total_cents: 233_254, aproximado: true, pagador: 1, parte_cents: 116_627, paga: false },
-                ContaCasa { nome: "Aluguel".into(), dia: 1, total_cents: 480_000, aproximado: false, pagador: 1, parte_cents: 240_000, paga: false },
-                ContaCasa { nome: "Condomínio".into(), dia: 1, total_cents: 158_000, aproximado: false, pagador: 0, parte_cents: 79_000, paga: false },
-                ContaCasa { nome: "Luz".into(), dia: 5, total_cents: 34_000, aproximado: false, pagador: 0, parte_cents: 17_000, paga: false },
-                ContaCasa { nome: "Internet".into(), dia: 10, total_cents: 12_990, aproximado: false, pagador: 0, parte_cents: 6_495, paga: false },
-                ContaCasa { nome: "Plano de saúde".into(), dia: 15, total_cents: 560_300, aproximado: false, pagador: 1, parte_cents: 280_150, paga: false },
-                ContaCasa { nome: "Água".into(), dia: 20, total_cents: 54_700, aproximado: false, pagador: 0, parte_cents: 27_350, paga: false },
+                ContaCasa { id: 0, nome: "Apartamento Vila Mariana".into(), dia: 1, total_cents: 233_254, aproximado: true, pagador: 1, parte_cents: 116_627, paga: false },
+                ContaCasa { id: 0, nome: "Aluguel".into(), dia: 1, total_cents: 480_000, aproximado: false, pagador: 1, parte_cents: 240_000, paga: false },
+                ContaCasa { id: 0, nome: "Condomínio".into(), dia: 1, total_cents: 158_000, aproximado: false, pagador: 0, parte_cents: 79_000, paga: false },
+                ContaCasa { id: 0, nome: "Luz".into(), dia: 5, total_cents: 34_000, aproximado: false, pagador: 0, parte_cents: 17_000, paga: false },
+                ContaCasa { id: 0, nome: "Internet".into(), dia: 10, total_cents: 12_990, aproximado: false, pagador: 0, parte_cents: 6_495, paga: false },
+                ContaCasa { id: 0, nome: "Plano de saúde".into(), dia: 15, total_cents: 560_300, aproximado: false, pagador: 1, parte_cents: 280_150, paga: false },
+                ContaCasa { id: 0, nome: "Água".into(), dia: 20, total_cents: 54_700, aproximado: false, pagador: 0, parte_cents: 27_350, paga: false },
             ],
         },
         fluxo: vec![

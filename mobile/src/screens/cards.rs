@@ -14,7 +14,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let mes = app.mes_label().split_whitespace().next().unwrap_or("").to_lowercase();
 
     // Resumo do mês: total das faturas + ilustração.
-    let total = app.mock.cartoes.total_faturas_cents;
+    let total = app.dados.cartoes.total_faturas_cents;
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -32,13 +32,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     });
 
     // Um bloco por cartão do mês.
-    for cartao in &app.mock.cartoes.cards {
+    for cartao in &app.dados.cartoes.cards {
         let limite_txt = fmt_money(cartao.limite_cents);
         item(ui, cartao, &limite_txt, &c);
     }
 
-    // Adicionar cartão novo: abre a folha de cartão.
-    if ui
+    // Adicionar cartão novo: só na demonstração (cartões reais chegam da Pluggy).
+    if app.demo && ui
         .add_sized(
             [ui.available_width(), 56.0],
             egui::Button::new(

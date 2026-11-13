@@ -20,12 +20,12 @@ fn shot(app: MobileApp, name: &str, dir: &std::path::Path) {
 fn capturas() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screenshots");
     std::fs::create_dir_all(&dir).unwrap();
-    shot(MobileApp::new(), "inicio", &dir);
-    shot(MobileApp { tab: Tab::Fluxo, ..MobileApp::new() }, "fluxo", &dir);
-    shot(MobileApp { tab: Tab::Cartoes, ..MobileApp::new() }, "cartoes", &dir);
-    shot(MobileApp { tab: Tab::Casa, ..MobileApp::new() }, "casa", &dir);
-    // Folha de novo cartão, preenchida para a captura.
-    let mut app = MobileApp { tab: Tab::Cartoes, ..MobileApp::new() };
+    shot(MobileApp::load(None), "inicio", &dir);
+    shot(MobileApp { tab: Tab::Fluxo, ..MobileApp::load(None) }, "fluxo", &dir);
+    shot(MobileApp { tab: Tab::Cartoes, ..MobileApp::load(None) }, "cartoes", &dir);
+    shot(MobileApp { tab: Tab::Casa, ..MobileApp::load(None) }, "casa", &dir);
+    // Folha de novo cartão, preenchida para a captura (demo: o botão só existe nela).
+    let mut app = MobileApp { tab: Tab::Cartoes, demo: true, ..MobileApp::load(None) };
     app.sheet = Some(flounder_mobile::app::Sheet::Cartao(flounder_mobile::app::SheetCartao {
         banco: "Inter".into(),
         limite: "5.000,00".into(),

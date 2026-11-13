@@ -26,12 +26,12 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                     ui.label(egui::RichText::new(icon::INFO).font(w::regular(14.0)).color(c.faint));
                 });
                 ui.add_space(4.0);
-                theme::money(ui, app.mock.saldo.centavos, 30.0, c.ink);
+                theme::money(ui, app.dados.saldo.centavos, 30.0, c.ink);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(icon::TREND_UP).font(w::bold(12.0)).color(c.green));
                     ui.label(
-                        egui::RichText::new(format!("{}% do salário livre", app.mock.saldo.pct_livre))
+                        egui::RichText::new(format!("{}% do salário livre", app.dados.saldo.pct_livre))
                             .font(w::semibold(12.0))
                             .color(c.green),
                     );
@@ -45,7 +45,7 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
 
         // Barra empilhada com a repartição do salário.
         let segmentos: Vec<(f32, Color32)> = app
-            .mock
+            .dados
             .reparticao
             .iter()
             .map(|r| (r.pct as f32 / 100.0, r.cor))
@@ -54,7 +54,7 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
         ui.add_space(12.0);
 
         // Uma linha por pedaço: bolinha da cor, label, valor e pct.
-        for r in &app.mock.reparticao {
+        for r in &app.dados.reparticao {
             let cor_valor = if r.label == "Sobra" { c.green } else { c.ink };
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
@@ -80,7 +80,7 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                     ui.label(egui::RichText::new("Salário").font(w::regular(13.0)).color(c.muted));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(egui::RichText::new(icon::PENCIL_SIMPLE).font(w::regular(16.0)).color(c.muted));
-                        theme::money(ui, app.mock.salario_cents, 15.0, c.ink);
+                        theme::money(ui, app.dados.salario_cents, 15.0, c.ink);
                     });
                 });
             });
@@ -92,17 +92,17 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     // Dia selecionado na tira (lembra entre frames; padrão = destaque do mock).
     let lembrado = ui.memory(|m| m.data.get_temp::<u8>(egui::Id::new("pagar-dia")));
     let dia_sel = match lembrado {
-        Some(d) if app.mock.pagar.dias.iter().any(|x| x.0 == d) => d,
-        _ => app.mock.pagar.dia,
+        Some(d) if app.dados.pagar.dias.iter().any(|x| x.0 == d) => d,
+        _ => app.dados.pagar.dia,
     };
     let total_dia = app
-        .mock
+        .dados
         .pagar
         .dias
         .iter()
         .find(|x| x.0 == dia_sel)
         .map(|x| x.2)
-        .unwrap_or(app.mock.pagar.total_cents);
+        .unwrap_or(app.dados.pagar.total_cents);
 
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
@@ -123,7 +123,7 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
         egui::ScrollArea::horizontal().id_salt("tira-pagar").show(ui, |ui| {
             ui.set_min_height(60.0);
             ui.horizontal(|ui| {
-                for (dia, _, total) in &app.mock.pagar.dias {
+                for (dia, _, total) in &app.dados.pagar.dias {
                     chip_dia(ui, *dia, *total, dia_sel, c);
                     ui.add_space(8.0);
                 }
@@ -132,11 +132,11 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
         ui.add_space(8.0);
 
         // Contas do dia selecionado; sem contas, mostra as próximas do mês.
-        let do_dia: Vec<&ContaCasa> = app.mock.casa.bills.iter().filter(|b| b.dia == dia_sel).collect();
+        let do_dia: Vec<&ContaCasa> = app.dados.casa.bills.iter().filter(|b| b.dia == dia_sel).collect();
         if do_dia.is_empty() {
             ui.label(egui::RichText::new("próximas contas").font(w::regular(12.0)).color(c.muted));
             ui.add_space(2.0);
-            let mut todas: Vec<&ContaCasa> = app.mock.casa.bills.iter().collect();
+            let mut todas: Vec<&ContaCasa> = app.dados.casa.bills.iter().collect();
             todas.sort_by_key(|b| b.dia);
             for b in todas.into_iter().take(3) {
                 linha_conta(ui, b, c);

@@ -10,12 +10,12 @@ use crate::theme;
 
 pub fn show(ui: &mut Ui, app: &mut MobileApp) {
     // Resumo recalculado pelas contas atuais (clique na bolinha mantém o mock coerente).
-    let qtd_pend = app.mock.casa.bills.iter().filter(|b| !b.paga).count() as u8;
-    let total_pend: i64 = app.mock.casa.bills.iter().filter(|b| !b.paga).map(|b| b.total_cents).sum();
-    let qtd_pagas = app.mock.casa.bills.iter().filter(|b| b.paga).count() as u8;
-    let total_pagas: i64 = app.mock.casa.bills.iter().filter(|b| b.paga).map(|b| b.total_cents).sum();
-    app.mock.casa.pendentes_qtd = qtd_pend;
-    app.mock.casa.pendentes_total_cents = total_pend;
+    let qtd_pend = app.dados.casa.bills.iter().filter(|b| !b.paga).count() as u8;
+    let total_pend: i64 = app.dados.casa.bills.iter().filter(|b| !b.paga).map(|b| b.total_cents).sum();
+    let qtd_pagas = app.dados.casa.bills.iter().filter(|b| b.paga).count() as u8;
+    let total_pagas: i64 = app.dados.casa.bills.iter().filter(|b| b.paga).map(|b| b.total_cents).sum();
+    app.dados.casa.pendentes_qtd = qtd_pend;
+    app.dados.casa.pendentes_total_cents = total_pend;
 
     let c = theme::cores();
 
@@ -27,7 +27,7 @@ pub fn show(ui: &mut Ui, app: &mut MobileApp) {
             ui.label(egui::RichText::new(icon::INFO).font(w::regular(13.0)).color(c.faint));
         });
         ui.label(
-            egui::RichText::new(format!("{} contas · meio a meio", app.mock.casa.total_contas))
+            egui::RichText::new(format!("{} contas · meio a meio", app.dados.casa.total_contas))
                 .font(w::regular(13.0))
                 .color(c.muted),
         );
@@ -55,7 +55,7 @@ pub fn show(ui: &mut Ui, app: &mut MobileApp) {
 
         // Lista filtrada pelo segmento escolhido.
         let indices: Vec<usize> = app
-            .mock
+            .dados
             .casa
             .bills
             .iter()
@@ -141,7 +141,7 @@ fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
     let c = theme::cores();
     // Copia os campos para soltar o empréstimo antes do possível clique.
     let (nome, dia, total, aprox, pagador, parte, paga) = {
-        let b = &app.mock.casa.bills[idx];
+        let b = &app.dados.casa.bills[idx];
         (b.nome.clone(), b.dia, b.total_cents, b.aproximado, b.pagador, b.parte_cents, b.paga)
     };
     let (nome_membro, cor_pagador) = MEMBROS[pagador];
@@ -153,7 +153,18 @@ fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
         // Bolinha de pago: clique alterna e o resumo recalcula no próximo frame.
         let resp = theme::bolinha_check(ui, paga, c.green);
         if resp.clicked() {
-            app.mock.casa.bills[idx].paga = !app.mock.casa.bills[idx].paga;
+            if app.demo {
+                app.dados.casa.bills[idx].paga = !app.dados.casa.bills[idx].paga;
+            } else {
+                // Real: inverte a entrada e grava via worker (mesmo fluxo do desktop).
+                let id = app.dados.casa.bills[idx].id;
+                let month = flounder::model::Month { y: app.y, m: app.m as u32 };
+                app.data.toggle(flounder::model::BillRef::Entry(id), month);
+                if let Some(e) = app.data.entry(id) {
+                    app.enviar(flounder::backend::Cmd::Entry(e.clone()));
+                }
+                app.atualizar_mes();
+            }
         }
         ui.add_space(6.0);
         ui.vertical(|ui| {

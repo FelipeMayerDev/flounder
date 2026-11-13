@@ -1,9 +1,14 @@
-//! Casca do Flounder mobile: topo, barra do mês, tab bar flutuante, FAB e despacho das telas.
+//! Casca do Flounder mobile: topo, barra do mês, tab bar flutuante, FAB, telas e a sessão
+//! real com o backend (worker do desktop + pareamento por código; fase 1 vira demonstração).
 
 use egui::{Align, Align2, Color32, Frame, Layout, Ui, Vec2, pos2};
+use flounder::backend::{self, PairMsg, Worker};
+use flounder::model::{BillRef, Data, Entry, Kind, Month, Person};
 use flounder::widgets as w;
 use egui_phosphor::regular as icon;
+use std::sync::mpsc::Receiver;
 
+use crate::converter;
 use crate::mock::{self, MEMBROS};
 use crate::theme;
 
@@ -21,7 +26,7 @@ pub enum Filtro {
     Pagas,
 }
 
-/// Folha do FAB: novo lançamento (mock, gravando no mês aberto).
+/// Folha do FAB: novo lançamento.
 #[derive(Clone, Default)]
 pub struct SheetEntrada {
     pub desc: String,
@@ -30,7 +35,7 @@ pub struct SheetEntrada {
     pub tried: bool,
 }
 
-/// Folha de novo cartão (aba Cartões): banco, limite, fechamento e vencimento.
+/// Folha de novo cartão (aba Cartões, só na demonstração: cartões reais vêm da Pluggy).
 #[derive(Clone, Default)]
 pub struct SheetCartao {
     pub banco: String,
@@ -46,6 +51,18 @@ pub enum Sheet {
     Cartao(SheetCartao),
 }
 
+/// Sessão real com o backend (worker do desktop reutilizado).
+pub struct Conexao {
+    /// `client-N` autenticado; `None` até escolher ("Quem é você?").
+    pub me: Option<String>,
+    pub token: String,
+    pub members: Vec<flounder::api::Member>,
+    pub loaded: bool,
+    pub worker: Option<Worker>,
+    /// Falha de rede/credencial; some na próxima carga bem-sucedida.
+    pub offline: Option<String>,
+}
+
 pub struct MobileApp {
     pub y: i32,
     pub m: u8,
@@ -53,31 +70,88 @@ pub struct MobileApp {
     /// Posição de quem usa o celular (muda o "você" nas listas).
     pub eu: usize,
     pub filtro_casa: Filtro,
-    pub mock: mock::Mes,
+    /// View-model das telas: convertida do `data` real ou do mock (demonstração).
+    pub dados: mock::Mes,
     pub sheet: Option<Sheet>,
+    /// Modo demonstração: dados do mock, nada gravado.
+    pub demo: bool,
+    /// Sessão real com o backend; `None` = tela de pareamento.
+    pub sessao: Option<Conexao>,
+    /// Tela de pareamento: campo de código e a chamada em andamento.
+    pub parear_code: String,
+    pub pareio: Option<Receiver<PairMsg>>,
+    pub parear_erro: Option<String>,
+    /// Dados reais (espelho do backend, como no desktop).
+    pub data: Data,
+    /// Cartões conectados (vêm na API, como no desktop).
+    pub connected_cards: Option<Vec<flounder::connected::ConnectedCard>>,
 }
 
 impl Default for MobileApp {
     fn default() -> Self {
-        Self::new()
+        Self::load(None)
     }
 }
 
 impl MobileApp {
-    pub fn new() -> Self {
+    /// Sessão: token pareado (storage) → token do arquivo de config (dev) → pareamento.
+    pub fn load(storage: Option<&dyn eframe::Storage>) -> Self {
+        // Sessão: token pareado (storage) → token do arquivo de config (dev) → pareamento.
+        let (client, token) = match storage.and_then(|s| s.get_string("member_token")) {
+            Some(token) => (storage.and_then(|s| s.get_string("member_client")), token),
+            None => match backend::env_token("client-1") {
+                Some(token) => (None, token),
+                None => (None, String::new()),
+            },
+        };
+        let sessao = (!token.is_empty()).then(|| Conexao {
+            me: client,
+            token,
+            members: Vec::new(),
+            loaded: false,
+            worker: None,
+            offline: None,
+        });
+        let hoje = flounder::model::today();
         MobileApp {
-            y: 2026,
-            m: 12,
+            y: hoje.y,
+            m: hoje.m as u8,
             // FLOUNDER_TAB=cards abre direto em Cartões (útil para testar a janela real).
-        tab: if std::env::var("FLOUNDER_TAB").as_deref() == Ok("cards") { Tab::Cartoes } else { Tab::Inicio },
+            tab: if std::env::var("FLOUNDER_TAB").as_deref() == Ok("cards") { Tab::Cartoes } else { Tab::Inicio },
             eu: 0,
             filtro_casa: Filtro::Todas,
-            mock: mock::para(2026, 12),
+            dados: mock::para(hoje.y, hoje.m as u8),
             sheet: None,
+            connected_cards: None,
+            demo: sessao.is_none(),
+            sessao,
+            parear_code: String::new(),
+            pareio: None,
+            parear_erro: None,
+            data: Data::empty(),
         }
     }
 
-    /// Navega de mês; recarrega o mock (fase 2: busca na API).
+    /// Envia um comando pela conexão (demo: sem efeito).
+    pub fn enviar(&mut self, cmd: backend::Cmd) {
+        if let Some(w) = self.sessao.as_mut().and_then(|c| c.worker.as_mut()) {
+            w.save(cmd);
+        }
+    }
+
+    /// Recalcula a view-model do mês aberto (real ou demo).
+    pub fn atualizar_mes(&mut self) {
+        let month = Month { y: self.y, m: self.m as u32 };
+        self.dados = if self.demo {
+            mock::para(self.y, self.m)
+        } else {
+            let eu = self.eu;
+            let cartoes = self.connected_cards.as_deref();
+            converter::mes(&self.data, cartoes, month, eu)
+        };
+    }
+
+    /// Navega de mês; o worker continua de olho no backend e a view-model se recalcula.
     pub fn andar_mes(&mut self, delta: i32) {
         self.m = ((self.m as i32 - 1 + delta).rem_euclid(12) + 1) as u8;
         if delta < 0 && self.m == 12 {
@@ -86,12 +160,132 @@ impl MobileApp {
         if delta > 0 && self.m == 1 {
             self.y += 1;
         }
-        self.mock = mock::para(self.y, self.m);
+        self.atualizar_mes();
     }
 
     pub fn mes_label(&self) -> String {
         const MESES: [&str; 12] = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
         format!("{} {}", MESES[(self.m - 1) as usize], self.y)
+    }
+
+    /// Espelho do `App::apply` do desktop: `api::State` → `Data`.
+    fn aplicar(&mut self, state: flounder::api::State, entries: Vec<flounder::model::Entry>) {
+        for m in &state.members {
+            if let Some(n) = self.data.names.get_mut(m.position as usize) {
+                n.clone_from(&m.name);
+            }
+        }
+        self.data.me = if state.me == 1 { Person::B } else { Person::A };
+        self.eu = self.data.me.idx();
+        self.data.entries = entries;
+        self.data.settlements = state
+            .settlements
+            .iter()
+            .filter(|s| s.from != s.to && s.from <= 1 && s.to <= 1)
+            .filter_map(|s| Some(flounder::model::Settlement {
+                id: s.id.clone(),
+                date: flounder::model::Date::iso(&s.date)?,
+                amount: s.amount_cents,
+                from: if s.from == 1 { Person::B } else { Person::A },
+            }))
+            .collect();
+        self.connected_cards = Some(state.cards);
+        self.data.shared_split_off = state.shared_split_off;
+        if let Some(cx) = self.sessao.as_mut() {
+            cx.members = state.members.clone();
+            cx.loaded = true;
+            cx.me = state.members.get(state.me as usize).map(|m| m.client.clone());
+        }
+        self.atualizar_mes();
+    }
+
+    /// Drena o worker e reflete o estado no `data` (mesmo fluxo do desktop).
+    fn poll_remoto(&mut self, ctx: &egui::Context) {
+        // Worker nasce no primeiro quadro (client e token resolvidos uma vez).
+        if self.sessao.as_ref().and_then(|c| c.worker.as_ref()).is_none() {
+            let Some(cx) = self.sessao.as_mut() else { return };
+            let client = cx.me.clone().unwrap_or_else(|| "client-1".into());
+            let token = if cx.token.is_empty() { backend::env_token(&client).unwrap_or_default() } else { cx.token.clone() };
+            if token.is_empty() {
+                cx.offline = Some("Não há token deste membro neste computador.".into());
+                return;
+            }
+            cx.worker = Some(Worker::start(client, token, backend::base_url(), ctx.clone()));
+        }
+        let mut carregar = None;
+        let mut nota = None;
+        if let Some(w) = self.sessao.as_mut().and_then(|c| c.worker.as_mut()) {
+            while let Ok(msg) = w.rx.try_recv() {
+                match msg {
+                    backend::Msg::State(state, entries) => carregar = Some((*state, entries)),
+                    backend::Msg::Offline(e) | backend::Msg::Done(Some(e)) => nota = Some(e),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(cx) = self.sessao.as_mut() {
+            if let Some(e) = nota {
+                cx.offline = Some(e);
+            }
+        }
+        if let Some((state, entries)) = carregar {
+            self.aplicar(state, entries);
+        }
+    }
+
+    /// Drena a resposta do pareamento e abre a sessão com o token recebido.
+    fn poll_pareio(&mut self) {
+        let Some(rx) = self.pareio.take() else { return };
+        let mut ok = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                PairMsg::Paired { client, token } => ok = Some((client, token)),
+                PairMsg::Failed(e) => {
+                    self.parear_erro = Some(e);
+                }
+            }
+        }
+        if let Some((client, token)) = ok {
+            self.parear_code.clear();
+            self.parear_erro = None;
+            self.sessao = Some(Conexao {
+                me: Some(client),
+                token,
+                members: Vec::new(),
+                loaded: false,
+                worker: None,
+                offline: None,
+            });
+        } else if self.parear_erro.is_none() {
+            // Ainda esperando o servidor: devolve o receiver para o próximo quadro.
+            self.pareio = Some(rx);
+        }
+    }
+
+    /// Escolhe quem usa o celular (token do arquivo de config por membro).
+    pub fn escolher(&mut self, client: String) {
+        let Some(cx) = self.sessao.as_mut() else { return };
+        let same = cx.me.as_deref() == Some(client.as_str());
+        cx.me = Some(client);
+        if same {
+            return;
+        }
+        *cx = Conexao {
+            me: cx.me.take(),
+            token: cx.token.clone(),
+            ..Default::default()
+        };
+        if cx.token.is_empty() {
+            let client = cx.me.clone().unwrap_or_default();
+            cx.token = backend::env_token(&client).unwrap_or_default();
+        }
+        self.eu = 0;
+    }
+}
+
+impl Default for Conexao {
+    fn default() -> Self {
+        Conexao { me: None, token: String::new(), members: Vec::new(), loaded: false, worker: None, offline: None }
     }
 }
 
@@ -113,15 +307,28 @@ pub fn fmt_money(cents: i64) -> String {
 }
 
 pub fn update(app: &mut MobileApp, ui: &mut Ui) {
+    app.poll_pareio();
+    app.poll_remoto(ui.ctx());
     topo(ui, app);
-    tabbar(ui, app);
+    let conectado = app.sessao.as_ref().is_some_and(|c| c.loaded);
+    let pareando = app.sessao.is_none() && !app.demo;
+    let carregando = !pareando && !conectado;
+    if !pareando && !carregando && !app.demo {
+        tabbar(ui, app);
+    }
     egui::CentralPanel::default()
         .frame(Frame::new().fill(theme::cores().bg).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 }))
         .show(ui, |ui| {
+            if pareando {
+                return tela_pareamento(ui, app);
+            }
+            if carregando {
+                return tela_conectando(ui, app);
+            }
             mes_barra(ui, app);
             ui.add_space(12.0);
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                if app.mock.vazio {
+                if app.dados.vazio {
                     theme::vazio(ui, "🐟", &format!("Nada por aqui em {}.", app.mes_label()));
                     return;
                 }
@@ -133,12 +340,138 @@ pub fn update(app: &mut MobileApp, ui: &mut Ui) {
                 }
             });
         });
-    folha(ui, app);
+    if !pareando && conectado {
+        modal_quem(ui, app);
+        folha(ui, app);
+    }
+}
+
+/// Tela de pareamento: código de acesso (uma vez só) ou demonstração.
+fn tela_pareamento(ui: &mut Ui, app: &mut MobileApp) {
+    let c = theme::cores();
+    let mut conectar = false;
+    let mut demo = false;
+    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        ui.add_space(40.0);
+        theme::card(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                w::art(ui, w::Art::Fish, 80.0);
+                w::text(ui, "Conectar ao servidor", w::bold(20.0), c.ink);
+                w::caption(ui, "Cole o código de acesso que quem te convidou mandou. Ele fica guardado neste celular — isso aqui é uma vez só.");
+                ui.add_space(14.0);
+                if app.pareio.is_some() {
+                    w::caption(ui, format!("{} Conectando…", icon::HOURGLASS));
+                } else {
+                    w::field(ui, "Código de acesso", None, |ui| {
+                        let response = ui.add(w::text_input(&mut app.parear_code, "Ex.: MARIA-2026-FLOUNDER"));
+                        if app.parear_code.is_empty() {
+                            response.request_focus();
+                        }
+                        response
+                    });
+                    if let Some(e) = &app.parear_erro {
+                        ui.label(egui::RichText::new(e.clone()).font(w::regular(13.0)).color(c.red));
+                    }
+                    ui.add_space(10.0);
+                    conectar = w::primary_button(ui, "Conectar").clicked();
+                    ui.add_space(6.0);
+                    demo = ui.button(egui::RichText::new("Explorar demonstração").font(w::semibold(13.0)).color(c.blue)).clicked();
+                }
+            });
+        });
+    });
+    if conectar {
+        if app.parear_code.trim().is_empty() {
+            app.parear_erro = Some("Informe o código de acesso.".into());
+        } else {
+            app.parear_erro = None;
+            app.pareio = Some(backend::send_pair(&backend::base_url(), &app.parear_code, ui.ctx().clone()));
+        }
+    }
+    if demo {
+        app.demo = true;
+        app.atualizar_mes();
+    }
+}
+
+/// Tela de conexão: carregando ou erro com nova tentativa.
+fn tela_conectando(ui: &mut Ui, app: &mut MobileApp) {
+    let c = theme::cores();
+    let Some(cx) = app.sessao.as_ref() else { return };
+    let mut tentar = false;
+    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        ui.add_space(40.0);
+        theme::card(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                w::art(ui, w::Art::Fish, 80.0);
+                match &cx.offline {
+                    Some(erro) => {
+                        w::text(ui, "Sem conexão com o backend", w::bold(20.0), c.ink);
+                        w::caption(ui, erro.clone());
+                        ui.add_space(8.0);
+                        tentar = w::primary_button(ui, "Tentar novamente").clicked();
+                    }
+                    None => {
+                        w::text(ui, "Carregando seus dados…", w::bold(20.0), c.ink);
+                        w::caption(ui, format!("Conectando ao backend em {}", backend::base_url()));
+                    }
+                }
+            });
+        });
+    });
+    if tentar {
+        if let Some(cx) = app.sessao.as_mut() {
+            cx.worker = None;
+            cx.offline = None;
+        }
+    }
+}
+
+/// "Quem é você?" — só na sessão por arquivo de config, antes de escolher.
+fn modal_quem(ui: &mut Ui, app: &mut MobileApp) {
+    let Some(cx) = app.sessao.as_ref() else { return };
+    if cx.me.is_some() || !cx.loaded || cx.members.is_empty() {
+        return;
+    }
+    let c = theme::cores();
+    let mut escolhido = None;
+    egui::Area::new(egui::Id::new("quem"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(c.card)
+                .corner_radius(egui::CornerRadius { nw: 24, ne: 24, sw: 24, se: 24 })
+                .inner_margin(egui::Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(320.0);
+                    ui.label(egui::RichText::new("Quem é você?").font(w::bold(18.0)).color(c.ink));
+                    ui.label(egui::RichText::new("Escolha quem usa este celular.").font(w::regular(13.0)).color(c.muted));
+                    ui.add_space(10.0);
+                    for m in &cx.members {
+                        if w::primary_button(ui, &m.name).clicked() {
+                            escolhido = Some(m.client.clone());
+                        }
+                    }
+                });
+        });
+    if let Some(client) = escolhido {
+        app.escolher(client);
+    }
 }
 
 impl eframe::App for MobileApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         update(self, ui);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some(cx) = self.sessao.as_ref() {
+            if let Some(me) = &cx.me {
+                storage.set_string("member_client", me.clone());
+            }
+            storage.set_string("member_token", cx.token.clone());
+        }
     }
 }
 
@@ -150,7 +483,7 @@ fn topo(parent: &mut Ui, app: &mut MobileApp) {
             ui.horizontal(|ui| {
                 let c = theme::cores();
                 if botao_icone(ui, icon::LIST, "Menu") {
-                    // Alternar quem usa o celular: recarrega o mock do mês (as listas trocam o "você").
+                    // Alternar quem usa o celular: recarrega os dados do mês (as listas trocam o "você").
                     app.eu = (app.eu + 1) % 2;
                 }
                 let (nome_eu, cor_eu) = MEMBROS[app.eu];
@@ -276,7 +609,8 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::PLUS.to_string(), w::bold(24.0), Color32::WHITE);
                 if resp.clicked() {
                     app.sheet = Some(match app.tab {
-                        Tab::Cartoes => Sheet::Cartao(SheetCartao::default()),
+                        // Cartões só têm folha própria na demonstração (cartões reais vêm da Pluggy).
+                        Tab::Cartoes if app.demo => Sheet::Cartao(SheetCartao::default()),
                         _ => Sheet::Entrada(SheetEntrada::default()),
                     });
                 }
@@ -288,7 +622,7 @@ fn CornerRadiusPill() -> egui::CornerRadius {
     egui::CornerRadius::same(255)
 }
 
-/// Folha do FAB: descrição + valor + dia (mock gravando no mês aberto).
+/// Folha do FAB: descrição + valor + dia (demo grava no mock; real grava via worker).
 fn folha(parent: &mut Ui, app: &mut MobileApp) {
     let Some(sheet) = app.sheet.clone() else { return };
     let c = theme::cores();
@@ -348,7 +682,7 @@ fn folha_entrada(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetEntrada) {
 fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
     let c = theme::cores();
     ui.label(egui::RichText::new("Novo cartão").font(w::bold(17.0)).color(c.ink));
-    ui.label(egui::RichText::new(format!("Aparece na lista de cartões de {}.", app.mes_label())).font(w::regular(13.0)).color(c.muted));
+    ui.label(egui::RichText::new("Só na demonstração: cartões reais chegam da Pluggy.").font(w::regular(13.0)).color(c.muted));
     ui.add_space(10.0);
     // Bancos com logo: toque escolhe; o campo de texto continua para nomes fora da lista.
     let bancos = ["Santander", "Nubank", "Inter", "Bradesco", "Caixa", "C6 Bank", "PicPay", "Banco do Brasil"];
@@ -425,6 +759,7 @@ fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) {
     ui.add_space(6.0);
 }
 
+/// Novo lançamento: demo grava no mock; real faz upsert no `data` e grava via worker.
 fn salvar_lancamento(app: &mut MobileApp) {
     let Some(Sheet::Entrada(sheet)) = app.sheet.as_ref().cloned() else { return };
     let bruto = sheet.valor.trim().replace('.', "").replace(',', ".");
@@ -436,25 +771,43 @@ fn salvar_lancamento(app: &mut MobileApp) {
         }
         return;
     }
-    let entrada = mock::Entrada {
-        desc: sheet.desc.trim().to_owned(),
-        centavos, // fase 1: tudo despesa; receita depois com o seletor
-        membro: app.eu,
-        shared: false,
-        card: None,
-        paid: false,
-    };
-    if let Some(d) = app.mock.fluxo.iter_mut().find(|d| d.dia == dia) {
-        d.entradas.push(entrada);
-    } else {
-        app.mock.fluxo.push(mock::DiaFluxo { dia, entradas: vec![entrada] });
-        app.mock.fluxo.sort_by_key(|d| d.dia);
-    }
+    let desc = sheet.desc.trim().to_owned();
     app.sheet = None;
+    let desc_demo = desc.clone();
+    if !app.demo {
+        let entrada = Entry {
+            id: 0,
+            desc,
+            amount: centavos,
+            date: flounder::model::Date { y: app.y, m: app.m as u32, d: dia as u32 },
+            kind: Kind::Expense,
+            category: flounder::model::Category::Other,
+            owner: if app.eu == 1 { Person::B } else { Person::A },
+            shared: false,
+            paid: false,
+            card: None,
+            connected: None,
+            imported: false,
+            recurring: false,
+        };
+        let id = app.data.upsert(entrada);
+        app.enviar(backend::Cmd::Entry(app.data.entry(id).expect("entrada acabou de entrar").clone()));
+    }
+    let dia_f = dia;
+    if app.demo {
+        let entrada = mock::Entrada { desc: desc_demo, centavos, membro: app.eu, shared: false, card: None, paid: false };
+        if let Some(d) = app.dados.fluxo.iter_mut().find(|d| d.dia == dia_f) {
+            d.entradas.push(entrada);
+        } else {
+            app.dados.fluxo.push(mock::DiaFluxo { dia: dia_f, entradas: vec![entrada] });
+            app.dados.fluxo.sort_by_key(|d| d.dia);
+        }
+    }
     app.tab = Tab::Fluxo;
+    app.atualizar_mes();
 }
 
-/// Novo cartão na cor da marca seguinte; fatura aberta zerada e disponível = limite.
+/// Novo cartão (só demonstração: cartões reais vêm da Pluggy).
 fn salvar_cartao(app: &mut MobileApp) {
     let Some(Sheet::Cartao(sheet)) = app.sheet.as_ref().cloned() else { return };
     let bruto = sheet.limite.trim().replace('.', "").replace(',', ".");
@@ -468,9 +821,9 @@ fn salvar_cartao(app: &mut MobileApp) {
         return;
     }
     let fecha_dias = (vence as i32 - fecha as i32).rem_euclid(31).max(1) as u32;
-    let cor = mock::CORES_BANCOS[app.mock.cartoes.cards.len() % mock::CORES_BANCOS.len()];
+    let cor = mock::CORES_BANCOS[app.dados.cartoes.cards.len() % mock::CORES_BANCOS.len()];
     let mes = app.mes_label().split_whitespace().next().unwrap_or("do mês").to_lowercase();
-    app.mock.cartoes.cards.push(mock::Cartao {
+    app.dados.cartoes.cards.push(mock::Cartao {
         banco: sheet.banco.trim().to_owned(),
         cor,
         aberta: true,
@@ -483,7 +836,7 @@ fn salvar_cartao(app: &mut MobileApp) {
         limite_cents,
         paga: false,
     });
-    app.mock.cartoes.total_faturas_cents = app.mock.cartoes.cards.iter().map(|c| c.total_cents).sum();
+    app.dados.cartoes.total_faturas_cents = app.dados.cartoes.cards.iter().map(|c| c.total_cents).sum();
     app.sheet = None;
     app.tab = Tab::Cartoes;
 }
