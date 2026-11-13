@@ -191,17 +191,25 @@ cargo test --release --test ui -- --ignored screenshots   # regera docs/screensh
   que testa nos dois sistemas e publica na GitHub Release a AppImage, o TAR.GZ, o ZIP e o `.exe`.
   A tag precisa bater com a versão do `Cargo.toml`; o CI ([`ci.yml`](.github/workflows/ci.yml))
   continua empacotando a cada push.
+- Sem o GitHub (conta suspensa ou servidor próprio): o backend publica os pacotes — `RELEASES_DIR`
+  no `backend/.env` aponta para o diretório montado no Compose (`./releases:/srv/releases:ro`) e
+  `GET /releases/latest` monta o índice no formato do GitHub com a versão mais recente. Fluxo:
+  bump no `Cargo.toml` → `scripts/package-appimage.sh`, `scripts/package-linux.sh`,
+  `cargo zigbuild --release --locked --target x86_64-pc-windows-gnu` → copia os 4 arquivos
+  (`Flounder-<v>-x86_64.AppImage`, `flounder-<v>-linux-x86_64.tar.gz`,
+  `flounder-<v>-windows-x86_64.exe` e `.zip`) para `releases/` no servidor → `docker compose up -d backend`.
 
 ## Atualização automática
 
-Ao abrir (e em "Verificar novamente", em Ajustes), o app consulta a última release no GitHub
-(`releases/latest`), compara com a própria versão e, se houver uma mais nova, baixa o pacote
-desta instalação em segundo plano: `Flounder-<v>-x86_64.AppImage` na AppImage e
-`flounder-<v>-windows-x86_64.exe` no Windows. Em "Reiniciar agora", o binário é trocado por
+Ao abrir (e em "Verificar novamente", em Ajustes), o app consulta a última release — no
+servidor de vocês (`/releases/latest`) ou no GitHub (`FLOUNDER_RELEASES_URL` aponta para outro
+lugar; máquina de desenvolvimento usa o GitHub), compara com a própria versão e, se houver uma
+mais nova, baixa o pacote desta instalação em segundo plano: `Flounder-<v>-x86_64.AppImage`
+na AppImage e `flounder-<v>-windows-x86_64.exe` no Windows. Em "Reiniciar agora", o binário é trocado por
 rename (o `flounder.env` ao lado do `.AppImage` não se mexe) e o app reabre sozinho.
 
 Instalações que não se atualizam sozinhas (tar.gz, `cargo run`) recebem só o aviso de versão
-nova, com o link da página de releases. Para testar contra um servidor próprio, use
+nova, com o link da página de releases. Para testar contra outro lugar, use
 `FLOUNDER_RELEASES_URL` apontando para um JSON no mesmo formato de `releases/latest`.
 
 Windows a partir do Linux, sem MSVC (só DLLs do sistema; o UCRT já vem no Windows 10+):
