@@ -34,6 +34,9 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file: backend/.env
+    volumes:
+      # Pacotes publicados para a atualização automática (/releases/latest).
+      - ./releases:/srv/releases:ro
     depends_on:
       postgres:
         condition: service_healthy

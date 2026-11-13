@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+/// O backend de vocês publica os pacotes e o índice de release (`/releases/latest`).
 const GITHUB: &str = "https://api.github.com/repos/FelipeMayerDev/flounder";
 /// GitHub exige User-Agent em qualquer chamada à API.
 const USER_AGENT: &str = concat!("flounder/", env!("CARGO_PKG_VERSION"));
@@ -111,13 +112,18 @@ fn check(send: &impl Fn(Msg)) {
     let Some(asset) = asset_for(&kind, &version, &release.assets) else {
         return send(Msg::Failed(format!("A versão {version} não tem pacote para este sistema. Atualize na página de releases.")));
     };
+    // O servidor de releases pode devolver caminho relativo (`/releases/…`): junta com a origem.
+    let mut asset = asset.clone();
+    if asset.url.starts_with('/') {
+        asset.url = format!("{}{}", origin(&releases_url()), asset.url);
+    }
     send(Msg::Downloading { version: version.clone() });
     let target = match &kind {
         Kind::AppImage(path) | Kind::WindowsExe(path) => path.clone(),
     };
     // O download não tem prazo: o pacote é grande e a conexão pode ser lenta.
     let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
-    match download(&agent, asset, &target, send) {
+    match download(&agent, &asset, &target, send) {
         Ok(path) => send(Msg::Ready { version, path }),
         Err(e) => send(Msg::Failed(e)),
     }
@@ -233,10 +239,19 @@ fn kind_path() -> PathBuf {
     }
 }
 
-/// `FLOUNDER_RELEASES_URL` aponta para outro lugar (testes); padrão: releases do projeto.
+/// Padrão: o próprio servidor de vocês (`/releases/latest`); o GitHub é o fallback quando
+/// `FLOUNDER_RELEASES_URL` aponta para ele (e nos testes, para um servidor local).
 fn releases_url() -> String {
-    let url = std::env::var("FLOUNDER_RELEASES_URL").unwrap_or_else(|_| format!("{GITHUB}/releases/latest"));
+    let url = std::env::var("FLOUNDER_RELEASES_URL")
+        .unwrap_or_else(|_| if crate::backend::dev_checkout() { format!("{GITHUB}/releases/latest") } else { format!("{}/releases/latest", crate::backend::SERVIDOR) });
     url.trim_end_matches('/').to_string()
+}
+
+/// Origem de uma URL (`https://host[:porta]`), para resolver caminhos relativos dos ativos.
+fn origin(url: &str) -> &str {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+    let host = rest.split('/').next().unwrap_or(rest);
+    &url[..scheme.len() + 3 + host.len()]
 }
 
 #[derive(serde::Deserialize)]
@@ -246,7 +261,7 @@ struct Release {
     assets: Vec<Asset>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct Asset {
     name: String,
     #[serde(rename = "browser_download_url")]
@@ -276,7 +291,8 @@ fn newer(current: &str, latest: &str) -> bool {
 }
 
 /// Pacote certo para esta instalação, na versão nova (mesmos nomes do empacotamento).
-fn asset_for<'a>(kind: &Kind, version: &str, assets: &'a [Asset]) -> Option<&'a Asset> {    let name = match kind {
+fn asset_for<'a>(kind: &Kind, version: &str, assets: &'a [Asset]) -> Option<&'a Asset> {
+    let name = match kind {
         Kind::AppImage(_) => format!("Flounder-{version}-x86_64.AppImage"),
         Kind::WindowsExe(_) => format!("flounder-{version}-windows-x86_64.exe"),
     };
@@ -334,6 +350,13 @@ mod tests {
         assert_eq!(a.url, "https://github.com/FelipeMayerDev/flounder/releases/download/v0.3.0/flounder-0.3.0-windows-x86_64.exe");
         assert_eq!(a.size, 21212121);
         assert!(latest("<html>taxa demais</html>").is_err());
+    }
+
+    #[test]
+    fn origin_of_the_releases_url_resolves_relative_assets() {
+        assert_eq!(origin("https://finance.felipemayer.com.br/releases/latest"), "https://finance.felipemayer.com.br");
+        assert_eq!(origin("http://127.0.0.1:8080/releases/latest"), "http://127.0.0.1:8080");
+        assert_eq!(origin("https://api.github.com/repos/x/releases/latest"), "https://api.github.com");
     }
 
     #[test]

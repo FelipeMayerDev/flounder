@@ -2,6 +2,7 @@ mod local;
 mod db;
 mod assistant;
 mod pairing;
+mod releases;
 #[allow(dead_code)] // Snapshot só é usado pelo desktop.
 #[path = "../../shared/cards.rs"]
 mod connected;
@@ -36,6 +37,8 @@ pub struct Config {
     tokens: [String; 2],
     /// Códigos fixos de pareamento (`PAIRING_CODE_N`, já normalizados); `None` = desligado.
     pairing_codes: [Option<String>; 2],
+    /// Diretório com os pacotes publicados (`RELEASES_DIR`); `None` = sem releases aqui.
+    releases_dir: Option<std::path::PathBuf>,
     bind: std::net::SocketAddr,
     database: tokio_postgres::Config,
     /// Modo local: `backend/.local/institutions.json` (item → banco) para o proxy MeuPluggy.
@@ -100,6 +103,7 @@ impl Config {
             pairing_codes: [lookup("PAIRING_CODE_1"), lookup("PAIRING_CODE_2")].map(|code| {
                 code.map(|s| pairing::normalize(&s)).filter(|s| !s.is_empty() && !s.starts_with("replace_"))
             }),
+            releases_dir: lookup("RELEASES_DIR").map(|s| std::path::PathBuf::from(s.trim())).filter(|p| !p.as_os_str().is_empty()),
             bind,
             database,
             institutions: None,
@@ -275,6 +279,8 @@ fn build_router(
             }),
         )
         .route("/api/pair", post(pairing::pair))
+        .route("/releases/latest", get(releases::latest))
+        .route("/releases/{nome}", get(releases::pacote))
         .merge(private)
         .merge(chat)
         .with_state(state)

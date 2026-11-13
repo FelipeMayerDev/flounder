@@ -223,6 +223,7 @@ async fn setup_with(
         zai_base: "https://api.z.ai/api/paas/v4".into(),
         zai_model: "glm-5.3".into(),
         pairing_codes: [None, None],
+        releases_dir: None,
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     (api, state, upstream)
@@ -432,6 +433,7 @@ async fn local_server_reports_missing_credentials_without_using_fake_upstream_da
         zai_base: "https://api.z.ai/api/paas/v4".into(),
         zai_model: "glm-5.3".into(),
         pairing_codes: [None, None],
+        releases_dir: None,
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     let http = reqwest::Client::new();
@@ -1136,6 +1138,7 @@ async fn setup_with_zai(database: tokio_postgres::Config, calls: Arc<AtomicUsize
         zai_base: zai.url.clone(),
         zai_model: "glm-5.3".into(),
         pairing_codes: [None, None],
+        releases_dir: None,
     };
     let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
     (api, upstream, zai)
@@ -1246,6 +1249,7 @@ async fn setup_pairing(codes: [Option<&str>; 2]) -> (Running, Arc<Mock>, Running
         client_secret: "test-secret".into(),
         tokens: [TOKEN_1.into(), TOKEN_2.into()],
         pairing_codes: codes.map(|c| c.map(str::to_owned)),
+        releases_dir: None,
         bind: "127.0.0.1:3001".parse().unwrap(),
         database: unused_database(),
         institutions: None,
@@ -1382,4 +1386,70 @@ fn pairing_codes_must_be_long_distinct_and_different_from_tokens() {
     assert!(read(&[("PAIRING_CODE_1", "CODIGO-IGUAL"), ("PAIRING_CODE_2", "codigo-igual")]).is_err(), "iguais depois de normalizar");
     assert!(read(&[("PAIRING_CODE_2", TOKEN_2)]).is_err(), "não pode ser o próprio token");
     assert!(read(&[]).unwrap().pairing_codes.iter().all(Option::is_none), "sem variáveis, o pareamento fica desligado");
+}
+
+#[tokio::test]
+async fn releases_publish_the_index_and_serve_the_packages() {
+    let dir = std::env::temp_dir().join(format!("flounder-rel-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Flounder-0.2.1-x86_64.AppImage"), b"APPIMAGE-NOVA").unwrap();
+    std::fs::write(dir.join("flounder-0.2.0-windows-x86_64.exe"), b"velho").unwrap();
+    let state = Arc::new(Mock::default());
+    let upstream = spawn(Router::new().fallback(mock).with_state(state.clone())).await;
+    let config = Config {
+        client_id: "test-id".into(),
+        client_secret: "test-secret".into(),
+        tokens: [TOKEN_1.into(), TOKEN_2.into()],
+        pairing_codes: [None, None],
+        releases_dir: Some(dir.clone()),
+        bind: "127.0.0.1:3001".parse().unwrap(),
+        database: unused_database(),
+        institutions: None,
+        zai_token: None,
+        zai_base: "https://api.z.ai/api/paas/v4".into(),
+        zai_model: "glm-5.3".into(),
+    };
+    let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
+    let http = reqwest::Client::new();
+    // Índice no formato do GitHub, com a versão mais recente e o caminho relativo do ativo.
+    let index: Value = http
+        .get(format!("{}/releases/latest", api.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(index["tag_name"], "v0.2.1");
+    let assets = index["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 1, "só a versão mais recente aparece");
+    assert_eq!(assets[0]["name"], "Flounder-0.2.1-x86_64.AppImage");
+    assert_eq!(assets[0]["browser_download_url"], "/releases/Flounder-0.2.1-x86_64.AppImage");
+    assert_eq!(assets[0]["size"], 13);
+    // Download do pacote.
+    let pacote = http
+        .get(format!("{}/releases/Flounder-0.2.1-x86_64.AppImage", api.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pacote.status(), StatusCode::OK);
+    assert_eq!(pacote.bytes().await.unwrap().as_ref(), b"APPIMAGE-NOVA");
+    // Truque de caminho não passa.
+    let traversal = http
+        .get(format!("{}/releases/..%2F.env", api.url))
+        .send()
+        .await
+        .unwrap();
+    assert!(traversal.status() == StatusCode::BAD_REQUEST || traversal.status() == StatusCode::NOT_FOUND);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn releases_without_a_directory_answer_that_there_is_nothing_published() {
+    let (api, _state, _upstream) = setup().await;
+    let http = reqwest::Client::new();
+    let response = http.get(format!("{}/releases/latest", api.url)).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["error"], "Nenhuma versão publicada ainda.");
 }

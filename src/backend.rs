@@ -319,7 +319,7 @@ fn env_path() -> std::path::PathBuf {
 }
 
 /// Máquina de desenvolvimento (o `backend/.env` do projeto existe): o padrão é o backend local.
-fn dev_checkout() -> bool {
+pub(crate) fn dev_checkout() -> bool {
     std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/backend/.env")).exists()
 }
 
