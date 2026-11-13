@@ -23,11 +23,27 @@ pub enum Filtro {
 
 /// Folha do FAB: novo lançamento (mock, gravando no mês aberto).
 #[derive(Clone, Default)]
-pub struct Sheet {
+pub struct SheetEntrada {
     pub desc: String,
     pub valor: String,
     pub dia: String,
     pub tried: bool,
+}
+
+/// Folha de novo cartão (aba Cartões): banco, limite, fechamento e vencimento.
+#[derive(Clone, Default)]
+pub struct SheetCartao {
+    pub banco: String,
+    pub limite: String,
+    pub venc: String,
+    pub fecha: String,
+    pub tried: bool,
+}
+
+#[derive(Clone)]
+pub enum Sheet {
+    Entrada(SheetEntrada),
+    Cartao(SheetCartao),
 }
 
 pub struct MobileApp {
@@ -116,7 +132,7 @@ pub fn update(app: &mut MobileApp, ui: &mut Ui) {
                 }
             });
         });
-    folha_novo(ui, app);
+    folha(ui, app);
 }
 
 impl eframe::App for MobileApp {
@@ -258,7 +274,10 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
                 ui.painter().circle_filled(rect.center(), 31.0, Color32::from_rgba_unmultiplied(47, 108, 255, 110));
                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::PLUS.to_string(), w::bold(24.0), Color32::WHITE);
                 if resp.clicked() {
-                    app.sheet = Some(crate::app::Sheet::default());
+                    app.sheet = Some(match app.tab {
+                        Tab::Cartoes => Sheet::Cartao(SheetCartao::default()),
+                        _ => Sheet::Entrada(SheetEntrada::default()),
+                    });
                 }
             });
         });
@@ -269,15 +288,16 @@ fn CornerRadiusPill() -> egui::CornerRadius {
 }
 
 /// Folha do FAB: descrição + valor + dia (mock gravando no mês aberto).
-fn folha_novo(parent: &mut Ui, app: &mut MobileApp) {
+fn folha(parent: &mut Ui, app: &mut MobileApp) {
     let Some(sheet) = app.sheet.clone() else { return };
     let c = theme::cores();
     egui::Area::new(egui::Id::new("folha-fundo"))
         .anchor(Align2::LEFT_TOP, Vec2::ZERO)
         .order(egui::Order::Foreground)
         .show(parent, |ui| {
-            let size = ui.available_rect_before_wrap().size();
-            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+            // Tela inteira: o rect herdado da Area pode vir recortado pelo layout.
+            let rect = parent.max_rect();
+            let resp = ui.allocate_rect(rect, egui::Sense::click());
             ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(16, 24, 40, 115));
             if resp.clicked() {
                 app.sheet = None;
@@ -287,41 +307,81 @@ fn folha_novo(parent: &mut Ui, app: &mut MobileApp) {
         .anchor(Align2::LEFT_BOTTOM, Vec2::ZERO)
         .order(egui::Order::Foreground)
         .show(parent, |ui| {
-            let sheet = &sheet;
             Frame::new()
                 .fill(c.card)
                 .corner_radius(egui::CornerRadius { nw: 24, ne: 24, ..Default::default() })
                 .inner_margin(egui::Margin { left: 18, right: 18, top: 18, bottom: 20 })
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(egui::RichText::new("Novo lançamento").font(w::bold(17.0)).color(c.ink));
-                    ui.label(egui::RichText::new(format!("Entra no fluxo de {}", app.mes_label())).font(w::regular(13.0)).color(c.muted));
-                    ui.add_space(10.0);
-                    let mut desc = sheet.desc.clone();
-                    let mut valor = sheet.valor.clone();
-                    let mut dia = sheet.dia.clone();
-                    campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz");
-                    campo(ui, "Valor (R$)", &mut valor, "0,00");
-                    campo(ui, "Dia do mês", &mut dia, "1-31");
-                    if let Some(s) = app.sheet.as_mut() {
-                        s.desc = desc.clone();
-                        s.valor = valor.clone();
-                        s.dia = dia.clone();
+                    match &sheet {
+                        Sheet::Entrada(sheet) => folha_entrada(ui, app, sheet),
+                        Sheet::Cartao(sheet) => folha_cartao(ui, app, sheet),
                     }
-                    if sheet.tried {
-                        ui.label(egui::RichText::new("Preencha descrição, valor e dia.").font(w::regular(12.0)).color(c.red));
-                    }
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        if ui.add_sized([ui.available_width() / 2.0 - 5.0, 44.0], egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14)).clicked() {
-                            app.sheet = None;
-                        }
-                        if ui.add_sized([ui.available_width(), 44.0], egui::Button::new(egui::RichText::new("Salvar").font(w::bold(15.0)).color(Color32::WHITE)).fill(c.blue).corner_radius(14)).clicked() {
-                            salvar_lancamento(app, &sheet);
-                        }
-                    });
                 });
         });
+}
+
+fn folha_entrada(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetEntrada) {
+    let c = theme::cores();
+    ui.label(egui::RichText::new("Novo lançamento").font(w::bold(17.0)).color(c.ink));
+    ui.label(egui::RichText::new(format!("Entra no fluxo de {}", app.mes_label())).font(w::regular(13.0)).color(c.muted));
+    ui.add_space(10.0);
+    let mut desc = sheet.desc.clone();
+    let mut valor = sheet.valor.clone();
+    let mut dia = sheet.dia.clone();
+    campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz");
+    campo(ui, "Valor (R$)", &mut valor, "0,00");
+    campo(ui, "Dia do mês", &mut dia, "1-31");
+    if let Some(Sheet::Entrada(s)) = app.sheet.as_mut() {
+        s.desc = desc.clone();
+        s.valor = valor.clone();
+        s.dia = dia.clone();
+    }
+    if sheet.tried {
+        ui.label(egui::RichText::new("Preencha descrição, valor e dia.").font(w::regular(12.0)).color(c.red));
+    }
+    ui.add_space(14.0);
+    acoes_folha(ui, app, |app| salvar_lancamento(app));
+}
+
+fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
+    let c = theme::cores();
+    ui.label(egui::RichText::new("Novo cartão").font(w::bold(17.0)).color(c.ink));
+    ui.label(egui::RichText::new(format!("Aparece na lista de cartões de {}.", app.mes_label())).font(w::regular(13.0)).color(c.muted));
+    ui.add_space(10.0);
+    let mut banco = sheet.banco.clone();
+    let mut limite = sheet.limite.clone();
+    let mut venc = sheet.venc.clone();
+    let mut fecha = sheet.fecha.clone();
+    campo(ui, "Banco ou nome do cartão", &mut banco, "Ex.: Santander Unique");
+    campo(ui, "Limite (R$)", &mut limite, "0,00");
+    ui.columns(2, |c| {
+        campo(&mut c[0], "Fecha no dia", &mut fecha, "1-31");
+        campo(&mut c[1], "Vence no dia", &mut venc, "1-31");
+    });
+    if let Some(Sheet::Cartao(s)) = app.sheet.as_mut() {
+        s.banco = banco.clone();
+        s.limite = limite.clone();
+        s.venc = venc.clone();
+        s.fecha = fecha.clone();
+    }
+    if sheet.tried {
+        ui.label(egui::RichText::new("Preencha banco, limite e dias válidos.").font(w::regular(12.0)).color(c.red));
+    }
+    ui.add_space(14.0);
+    acoes_folha(ui, app, |app| salvar_cartao(app));
+}
+
+fn acoes_folha(ui: &mut Ui, app: &mut MobileApp, salvar: impl FnOnce(&mut MobileApp)) {
+    let c = theme::cores();
+    ui.horizontal(|ui| {
+        if ui.add_sized([ui.available_width() / 2.0 - 5.0, 44.0], egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14)).clicked() {
+            app.sheet = None;
+        }
+        if ui.add_sized([ui.available_width(), 44.0], egui::Button::new(egui::RichText::new("Salvar").font(w::bold(15.0)).color(Color32::WHITE)).fill(c.blue).corner_radius(14)).clicked() {
+            salvar(app);
+        }
+    });
 }
 
 fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) {
@@ -331,27 +391,25 @@ fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) {
     ui.add_space(6.0);
 }
 
-fn salvar_lancamento(app: &mut MobileApp, sheet: &Sheet) {
+fn salvar_lancamento(app: &mut MobileApp) {
+    let Some(Sheet::Entrada(sheet)) = app.sheet.as_ref().cloned() else { return };
     let bruto = sheet.valor.trim().replace('.', "").replace(',', ".");
     let centavos = (bruto.parse::<f64>().unwrap_or(0.0) * 100.0).round() as i64;
     let dia: u8 = sheet.dia.trim().parse().unwrap_or(0);
     if sheet.desc.trim().is_empty() || centavos == 0 || dia == 0 || dia > 31 {
-        if let Some(s) = app.sheet.as_mut() {
+        if let Some(Sheet::Entrada(s)) = app.sheet.as_mut() {
             s.tried = true;
         }
         return;
     }
-    let valor_neg = centavos; // fase 1: tudo despesa; receita depois com o seletor
-    let (membro, _) = MEMBROS[app.eu];
     let entrada = mock::Entrada {
         desc: sheet.desc.trim().to_owned(),
-        centavos: valor_neg,
+        centavos, // fase 1: tudo despesa; receita depois com o seletor
         membro: app.eu,
         shared: false,
         card: None,
         paid: false,
     };
-    let _ = membro;
     if let Some(d) = app.mock.fluxo.iter_mut().find(|d| d.dia == dia) {
         d.entradas.push(entrada);
     } else {
@@ -360,4 +418,38 @@ fn salvar_lancamento(app: &mut MobileApp, sheet: &Sheet) {
     }
     app.sheet = None;
     app.tab = Tab::Fluxo;
+}
+
+/// Novo cartão na cor da marca seguinte; fatura aberta zerada e disponível = limite.
+fn salvar_cartao(app: &mut MobileApp) {
+    let Some(Sheet::Cartao(sheet)) = app.sheet.as_ref().cloned() else { return };
+    let bruto = sheet.limite.trim().replace('.', "").replace(',', ".");
+    let limite_cents = (bruto.parse::<f64>().unwrap_or(0.0) * 100.0).round() as i64;
+    let vence: u8 = sheet.venc.trim().parse().unwrap_or(0);
+    let fecha: u8 = sheet.fecha.trim().parse().unwrap_or(0);
+    if sheet.banco.trim().is_empty() || limite_cents <= 0 || vence == 0 || vence > 31 || fecha == 0 || fecha > 31 {
+        if let Some(Sheet::Cartao(s)) = app.sheet.as_mut() {
+            s.tried = true;
+        }
+        return;
+    }
+    let fecha_dias = (vence as i32 - fecha as i32).rem_euclid(31).max(1) as u32;
+    let cor = mock::CORES_BANCOS[app.mock.cartoes.cards.len() % mock::CORES_BANCOS.len()];
+    let mes = app.mes_label().split_whitespace().next().unwrap_or("do mês").to_lowercase();
+    app.mock.cartoes.cards.push(mock::Cartao {
+        banco: sheet.banco.trim().to_owned(),
+        cor,
+        aberta: true,
+        fecha_dias,
+        vence_dia: vence,
+        fatura_label: format!("Fatura de {mes}"),
+        total_cents: 0,
+        compras: 0,
+        disponivel_cents: limite_cents,
+        limite_cents,
+        paga: false,
+    });
+    app.mock.cartoes.total_faturas_cents = app.mock.cartoes.cards.iter().map(|c| c.total_cents).sum();
+    app.sheet = None;
+    app.tab = Tab::Cartoes;
 }

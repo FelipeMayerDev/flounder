@@ -36,6 +36,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
         let limite_txt = fmt_money(cartao.limite_cents);
         item(ui, cartao, &limite_txt, &c);
     }
+
+    // Adicionar cartão novo: abre a folha de cartão.
+    if ui
+        .add_sized(
+            [ui.available_width(), 56.0],
+            egui::Button::new(
+                egui::RichText::new(format!("{}  Adicionar cartão", icon::PLUS))
+                    .font(w::semibold(15.0))
+                    .color(c.blue),
+            )
+            .fill(c.blue_soft)
+            .corner_radius(22),
+        )
+        .clicked()
+    {
+        app.sheet = Some(crate::app::Sheet::Cartao(crate::app::SheetCartao::default()));
+    }
 }
 
 /// Cartão de um banco: faixa colorida, header, fatura e limite disponível.

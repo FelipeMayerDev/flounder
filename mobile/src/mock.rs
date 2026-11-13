@@ -5,6 +5,18 @@ use egui::Color32;
 
 pub const MEMBROS: [(&str, Color32); 2] = [("Felipe", Color32::from_rgb(47, 108, 255)), ("Larissa", Color32::from_rgb(240, 68, 56))];
 
+/// Cores de marca para cartões novos (Santander, Nubank, Itaú, Inter, Caixa, Bradesco, C6, PicPay).
+pub const CORES_BANCOS: [Color32; 8] = [
+    Color32::from_rgb(234, 29, 37),
+    Color32::from_rgb(130, 10, 209),
+    Color32::from_rgb(236, 112, 0),
+    Color32::from_rgb(255, 122, 0),
+    Color32::from_rgb(0, 112, 184),
+    Color32::from_rgb(165, 7, 30),
+    Color32::from_rgb(20, 20, 20),
+    Color32::from_rgb(33, 194, 94),
+];
+
 pub struct Mes {
     pub vazio: bool,
     pub salario_cents: i64,
