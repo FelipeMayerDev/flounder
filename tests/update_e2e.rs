@@ -8,7 +8,7 @@ use egui_kittest::Harness;
 use flounder::app::App;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -126,4 +126,89 @@ fn update_checks_downloads_and_swaps_the_appimage_end_to_end() {
     unsafe { std::env::remove_var("FLOUNDER_RELEASES_URL") };
     unsafe { std::env::remove_var("APPIMAGE") };
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Pareamento ponta a ponta com HTTP de verdade: o app novo digita o código, o servidor
+/// falso responde com o token (`POST /api/pair`) e a sincronização busca o estado
+/// (`GET /api/state`) — tudo sem arquivo de configuração.
+#[test]
+fn pairing_exchanges_the_code_over_real_http() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
+    let running = stop.clone();
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        while !running.load(Ordering::SeqCst) {
+            let (mut conn, _) = match listener.accept() {
+                Ok(c) => c,
+                Err(_) => { std::thread::sleep(std::time::Duration::from_millis(50)); continue; }
+            };
+            conn.set_nonblocking(false).unwrap();
+            let mut buf = [0u8; 8192];
+            let n = loop {
+                match conn.read(&mut buf) {
+                    Ok(n) if String::from_utf8_lossy(&buf[..n]).contains("\r\n\r\n") => break n,
+                    Ok(n) if n > 0 => continue,
+                    _ => break 0,
+                }
+            };
+            if n == 0 { continue; }
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            counted.fetch_add(1, Ordering::SeqCst);
+            let (status, payload) = if request.starts_with("POST /api/pair") {
+                let ok = request.contains("MARIA-2026-FLOUNDER");
+                if ok {
+                    ("200 OK", r#"{"client":"client-2","token":"token-pareado-2"}"#.to_owned())
+                } else {
+                    ("401 UNAUTHORIZED", r#"{"error":"Código de acesso inválido."}"#.to_owned())
+                }
+            } else {
+                ("200 OK", r#"{"me":1,"members":[{"position":1,"name":"Larissa","client":"client-2"},{"position":0,"name":"Felipe","client":"client-1"}],"entries":[],"reserve":null,"cards":[]}"#.to_owned())
+            };
+            let head = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len());
+            let _ = conn.write_all(head.as_bytes());
+            let _ = conn.write_all(payload.as_bytes());
+        }
+    });
+
+    unsafe { std::env::set_var("FLOUNDER_BACKEND_URL", &url) };
+    unsafe { std::env::set_var("FLOUNDER_BACKEND_ENV", "/não-existe/flounder.env") };
+
+    let mut app = App::load(None);
+    let mut hs = Harness::builder().with_size([1024.0, 700.0]).with_max_steps(600).build_eframe(|cc| {
+        flounder::widgets::install(&cc.egui_ctx);
+        app
+    });
+    hs.run();
+    assert!(hs.query_by_label_contains("Conectar ao servidor").is_some(), "sem arquivo e sem pareamento: tela de código");
+    // A resposta do servidor chega assíncrona: rodar quadros até o texto aparecer.
+    let espera = |hs: &mut Harness<App>, texto: &str| {
+        for _ in 0..100 {
+            hs.run();
+            if hs.query_all_by_label_contains(texto).count() >= 1 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    };
+    // Código errado: o servidor recusa e o app mostra o erro.
+    hs.state_mut().pair.code = "ERRADO-1234".into();
+    hs.get_by_label("Conectar").click();
+    assert!(espera(&mut hs, "Código de acesso inválido."), "401 do servidor vira mensagem clara");
+    // Código certo: pareia, busca o estado e entra direto como Larissa.
+    hs.state_mut().pair.code = "MARIA-2026-FLOUNDER".into();
+    hs.get_by_label("Conectar").click();
+    assert!(espera(&mut hs, "Larissa"), "pareia e busca o estado por HTTP");
+    assert!(hs.query_by_label_contains("Conectar ao servidor").is_none(), "pareou: tela de código some");
+    assert!(hs.query_by_label("Quem é você?").is_none(), "o código já diz quem é");
+    assert_eq!(hs.state().remote.as_ref().unwrap().member_token.as_deref(), Some("token-pareado-2"));
+    assert!(requests.load(Ordering::SeqCst) >= 3, "pair (2×) + state por HTTP de verdade");
+
+    stop.store(true, Ordering::SeqCst);
+    unsafe { std::env::remove_var("FLOUNDER_BACKEND_URL") };
+    unsafe { std::env::remove_var("FLOUNDER_BACKEND_ENV") };
 }
