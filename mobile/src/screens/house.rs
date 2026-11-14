@@ -47,8 +47,9 @@ pub fn show(ui: &mut Ui, app: &mut MobileApp) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(titulo).font(w::semibold(15.0)).color(c.ink));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Total inteiro à direita; a nota trunca com "…" em vez de quebrar a linha feio.
                 theme::money(ui, total, 13.0, c.ink);
-                ui.label(egui::RichText::new(nota).font(w::regular(13.0)).color(c.muted));
+                ui.add(egui::Label::new(egui::RichText::new(nota).font(w::regular(13.0)).color(c.muted)).truncate());
             });
         });
         ui.add_space(8.0);
@@ -169,17 +170,21 @@ fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
         ui.add_space(6.0);
         ui.vertical(|ui| {
             // Linha 1: nome (mudo quando paga) e valor (≈ antes se aproximado).
+            // O valor fica sempre inteiro à direita; o nome encolhe com "…" em nomes longos.
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&nome)
-                        .font(w::semibold(14.0))
-                        .color(if paga { c.muted } else { c.ink }),
-                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     theme::money(ui, total, 14.0, c.ink);
                     if aprox {
                         ui.label(egui::RichText::new("≈").font(w::semibold(13.0)).color(c.muted));
                     }
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&nome)
+                                .font(w::semibold(14.0))
+                                .color(if paga { c.muted } else { c.ink }),
+                        )
+                        .truncate(),
+                    );
                 });
             });
             ui.add_space(3.0);
@@ -188,14 +193,17 @@ fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                 theme::avatar(ui, rect.center(), 9.0, &inicial.to_string(), cor_pagador);
                 ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(format!("{nome_pagador} · dia {dia}"))
-                        .font(w::regular(12.0))
-                        .color(c.muted),
-                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     theme::money(ui, parte, 12.0, c.muted);
                     ui.label(egui::RichText::new("sua parte").font(w::regular(12.0)).color(c.faint));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{nome_pagador} · dia {dia}"))
+                                .font(w::regular(12.0))
+                                .color(c.muted),
+                        )
+                        .truncate(),
+                    );
                 });
             });
         });

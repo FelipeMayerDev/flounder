@@ -134,19 +134,23 @@ fn linha(ui: &mut egui::Ui, i: usize, j: usize, app: &MobileApp, alternar: &mut 
         ui.painter().text(brect.center(), Align2::CENTER_CENTER, glifo.to_string(), w::semibold(13.0), cor_valor);
         ui.add_space(4.0);
         ui.vertical(|ui| {
-            // Descrição + valor; pendente leva o chip "a pagar" ao lado do valor.
+            // Valor sempre inteiro à direita; a descrição encolhe (trunca com …) em vez de empurrá-lo.
+            // Pendente leva o chip "a pagar" ao lado do valor.
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(e.desc.as_str()).font(w::semibold(14.0)).color(c.ink));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     theme::money(ui, e.centavos, 14.0, cor_valor);
                     if !e.paid {
                         ui.add_space(6.0);
                         chipzinho(ui, "a pagar", c.orange, c.orange_soft);
                     }
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(e.desc.as_str()).font(w::semibold(14.0)).color(c.ink))
+                            .truncate(),
+                    );
                 });
             });
-            // Quem lançou, cartão usado e compartilhamento.
-            ui.horizontal(|ui| {
+            // Quem lançou, cartão usado e compartilhamento (quebra para a linha de baixo se não couber).
+            ui.horizontal_wrapped(|ui| {
                 let (drect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 theme::avatar(ui, drect.center(), 8.0, &inicial, cor_membro);
                 ui.label(egui::RichText::new(quem).font(w::regular(12.0)).color(c.muted));

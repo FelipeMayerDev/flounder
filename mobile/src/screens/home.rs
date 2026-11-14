@@ -14,8 +14,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     card_pagar(ui, app, &c);
 }
 
-/// Card "Saldo previsto": total, barra da repartição e campo do salário no rodapé.
+/// Card "Saldo previsto": total, barra da repartição e campo da renda do mês no rodapé.
 fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
+    let negativo = app.dados.saldo.centavos < 0;
     theme::card(ui, |ui| {
         // Cabeçalho: título + ⓘ e o 👛 encostado no topo direito.
         ui.horizontal(|ui| {
@@ -26,56 +27,83 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                     ui.label(egui::RichText::new(icon::INFO).font(w::regular(14.0)).color(c.faint));
                 });
                 ui.add_space(4.0);
-                theme::money(ui, app.dados.saldo.centavos, 30.0, c.ink);
+                theme::money(ui, app.dados.saldo.centavos, 30.0, if negativo { c.red } else { c.ink });
                 ui.add_space(6.0);
+                // Saldo negativo: quanto falta para fechar o mês, em vermelho (como no desktop).
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(icon::TREND_UP).font(w::bold(12.0)).color(c.green));
-                    ui.label(
-                        egui::RichText::new(format!("{}% do salário livre", app.dados.saldo.pct_livre))
+                    if negativo {
+                        ui.label(egui::RichText::new(icon::WARNING_CIRCLE).font(w::bold(12.0)).color(c.red));
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Faltam R$ {} para fechar o mês",
+                                fmt_money(-app.dados.saldo.centavos)
+                            ))
                             .font(w::semibold(12.0))
-                            .color(c.green),
-                    );
+                            .color(c.red),
+                        );
+                    } else {
+                        ui.label(egui::RichText::new(icon::TREND_UP).font(w::bold(12.0)).color(c.green));
+                        ui.label(
+                            egui::RichText::new(format!("{}% do salário livre", app.dados.saldo.pct_livre))
+                                .font(w::semibold(12.0))
+                                .color(c.green),
+                        );
+                    }
                 });
             });
             w::art(ui, w::Art::MoneyBag, 54.0);
         });
         ui.add_space(12.0);
 
-        // Barra empilhada com a repartição do salário.
+        // Barra empilhada com a repartição do salário (Sobra fica vermelha se negativa).
         let segmentos: Vec<(f32, Color32)> = app
             .dados
             .reparticao
             .iter()
-            .map(|r| (r.pct as f32 / 100.0, r.cor))
+            .map(|r| {
+                let cor = if r.label == "Sobra" && r.centavos < 0 { c.red } else { r.cor };
+                (r.pct as f32 / 100.0, cor)
+            })
             .collect();
         theme::barra_empilhada(ui, &segmentos);
         ui.add_space(12.0);
 
         // Uma linha por pedaço: bolinha da cor, label, valor e pct.
         for r in &app.dados.reparticao {
-            let cor_valor = if r.label == "Sobra" { c.green } else { c.ink };
+            let sobra_negativa = r.label == "Sobra" && r.centavos < 0;
+            let cor_valor = if sobra_negativa {
+                c.red
+            } else if r.label == "Sobra" {
+                c.green
+            } else {
+                c.ink
+            };
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                 ui.painter().circle_filled(rect.center(), 4.0, r.cor);
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(r.label.as_str()).font(w::regular(14.0)).color(c.ink));
+                // Nome truncado ("…") para nunca invadir o valor alinhado à direita.
+                let largura_nome = (ui.available_width() - 140.0).max(60.0);
+                let fonte_nome = w::regular(14.0);
+                let nome = truncar(&r.label, fonte_nome.clone(), c.ink, ui, largura_nome);
+                ui.label(egui::RichText::new(nome).font(fonte_nome).color(c.ink));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(egui::RichText::new(format!("{}%", r.pct)).font(w::regular(12.0)).color(c.muted));
                     theme::money(ui, r.centavos, 14.0, cor_valor);
                 });
             });
-            ui.add_space(7.0);
+            ui.add_space(8.0);
         }
 
-        // Rodapé: campo do salário (estático na fase 1).
-        ui.add_space(2.0);
+        // Rodapé: renda lançada no mês (pode diferir do salário fixo).
+        ui.add_space(8.0);
         egui::Frame::new()
             .fill(c.line)
             .corner_radius(14)
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Salário").font(w::regular(13.0)).color(c.muted));
+                    ui.label(egui::RichText::new("Renda do mês").font(w::regular(13.0)).color(c.muted));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(egui::RichText::new(icon::PENCIL_SIMPLE).font(w::regular(16.0)).color(c.muted));
                         theme::money(ui, app.dados.salario_cents, 15.0, c.ink);
@@ -111,9 +139,9 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
             );
             w::art(ui, w::Art::SpiralCalendar, 46.0);
         });
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         theme::money(ui, total_dia, 28.0, c.ink);
-        ui.add_space(14.0);
+        ui.add_space(16.0);
 
         // Tira horizontal de dias; toque seleciona.
         egui::ScrollArea::horizontal().id_salt("tira-pagar").show(ui, |ui| {
@@ -146,15 +174,22 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
 }
 
 /// Caixinha da tira: dia em cima, total curto embaixo; azul quando selecionada.
+/// Largura mínima de 56 px e cresce conforme o total, para nada ficar cortado.
 fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &Cores) {
     let on = dia == selecionado;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::click());
-    ui.painter().rect_filled(rect, 14.0, if on { c.blue } else { c.line });
     let (cor_dia, cor_total) = if on {
         (Color32::WHITE, Color32::from_rgba_unmultiplied(255, 255, 255, 200))
     } else {
         (c.ink, c.muted)
     };
+    let total_txt = total_curto(total_cents);
+    let largura_total = ui
+        .painter()
+        .layout_no_wrap(total_txt.clone(), w::regular(10.5), cor_total)
+        .size()
+        .x;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new((largura_total + 20.0).max(56.0), 56.0), Sense::click());
+    ui.painter().rect_filled(rect, 14.0, if on { c.blue } else { c.line });
     ui.painter().text(
         pos2(rect.center().x, rect.top() + 19.0),
         Align2::CENTER_CENTER,
@@ -165,7 +200,7 @@ fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &C
     ui.painter().text(
         pos2(rect.center().x, rect.bottom() - 14.0),
         Align2::CENTER_CENTER,
-        total_curto(total_cents),
+        total_txt,
         w::regular(10.5),
         cor_total,
     );
@@ -177,7 +212,11 @@ fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &C
 /// Linha "nome ..... R$ valor" de uma conta da casa.
 fn linha_conta(ui: &mut egui::Ui, b: &ContaCasa, c: &Cores) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(b.nome.as_str()).font(w::regular(14.0)).color(c.ink));
+        // Nome truncado ("…") para nunca invadir o valor alinhado à direita.
+        let largura_nome = (ui.available_width() - 120.0).max(60.0);
+        let fonte_nome = w::regular(14.0);
+        let nome = truncar(&b.nome, fonte_nome.clone(), c.ink, ui, largura_nome);
+        ui.label(egui::RichText::new(nome).font(fonte_nome).color(c.ink));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             theme::money(ui, b.total_cents, 14.0, c.ink);
             if b.aproximado {
@@ -185,12 +224,36 @@ fn linha_conta(ui: &mut egui::Ui, b: &ContaCasa, c: &Cores) {
             }
         });
     });
-    ui.add_space(7.0);
+    ui.add_space(8.0);
 }
 
-/// Total curto para a tira ("R$ 1.937"): corta os centavos.
+/// Total curto para a tira: corta os centavos ("R$ 849", "R$ 8.712") e abrevia
+/// milhares longos ("R$ 19k") para caber na caixinha.
 fn total_curto(cents: i64) -> String {
-    let completo = fmt_money(cents);
-    let inteiro = completo.split(',').next().unwrap_or("0");
-    format!("R$ {inteiro}")
+    let reais = cents.abs() / 100;
+    if reais > 9_999 {
+        format!("R$ {}k", reais / 1000)
+    } else {
+        let completo = fmt_money(cents);
+        let inteiro = completo.split(',').next().unwrap_or("0");
+        format!("R$ {inteiro}")
+    }
+}
+
+/// Corta o texto com "…" para caber na largura dada (mede com a própria fonte),
+/// para nomes longos nunca invadirem o valor alinhado à direita.
+pub(crate) fn truncar(texto: &str, fonte: egui::FontId, cor: Color32, ui: &egui::Ui, largura: f32) -> String {
+    let pintor = ui.painter().clone();
+    let cabe = |t: &str| pintor.layout_no_wrap(t.to_owned(), fonte.clone(), cor).size().x <= largura;
+    if cabe(texto) {
+        return texto.to_owned();
+    }
+    let chars: Vec<char> = texto.chars().collect();
+    for fim in (1..chars.len()).rev() {
+        let candidato: String = chars[..fim].iter().collect::<String>() + "…";
+        if cabe(&candidato) {
+            return candidato;
+        }
+    }
+    "…".to_owned()
 }

@@ -119,8 +119,14 @@ impl MobileApp {
         MobileApp {
             y: hoje.y,
             m: hoje.m as u8,
-            // FLOUNDER_TAB=cards abre direto em Cartões (útil para testar a janela real).
-            tab: if std::env::var("FLOUNDER_TAB").as_deref() == Ok("cards") { Tab::Cartoes } else { Tab::Inicio },
+            // FLOUNDER_TAB=<aba> abre direto na aba (útil para testar a janela real).
+            tab: match std::env::var("FLOUNDER_TAB").as_deref() {
+                Ok("fluxo") => Tab::Fluxo,
+                Ok("cartoes") => Tab::Cartoes,
+                Ok("casa") => Tab::Casa,
+                Ok("consultor") => Tab::Consultor,
+                _ => Tab::Inicio,
+            },
             eu: 0,
             filtro_casa: Filtro::Todas,
             dados: mock::para(hoje.y, hoje.m as u8),
@@ -447,25 +453,19 @@ fn modal_quem(ui: &mut Ui, app: &mut MobileApp) {
     }
     let c = theme::cores();
     let mut escolhido = None;
-    egui::Area::new(egui::Id::new("quem"))
-        .order(egui::Order::Foreground)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+    // Modal centraliza sozinho e bloqueia o que está por baixo (padrão do desktop, fn form_modal).
+    egui::Modal::new(egui::Id::new("quem"))
+        .frame(Frame::new().fill(c.card).corner_radius(egui::CornerRadius { nw: 24, ne: 24, sw: 24, se: 24 }).inner_margin(egui::Margin::same(20)))
         .show(ui.ctx(), |ui| {
-            Frame::new()
-                .fill(c.card)
-                .corner_radius(egui::CornerRadius { nw: 24, ne: 24, sw: 24, se: 24 })
-                .inner_margin(egui::Margin::same(20))
-                .show(ui, |ui| {
-                    ui.set_width(320.0);
-                    ui.label(egui::RichText::new("Quem é você?").font(w::bold(18.0)).color(c.ink));
-                    ui.label(egui::RichText::new("Escolha quem usa este celular.").font(w::regular(13.0)).color(c.muted));
-                    ui.add_space(10.0);
-                    for m in &cx.members {
-                        if w::primary_button(ui, &m.name).clicked() {
-                            escolhido = Some(m.client.clone());
-                        }
-                    }
-                });
+            ui.set_width(320.0);
+            ui.label(egui::RichText::new("Quem é você?").font(w::bold(18.0)).color(c.ink));
+            ui.label(egui::RichText::new("Escolha quem usa este celular.").font(w::regular(13.0)).color(c.muted));
+            ui.add_space(10.0);
+            for m in &cx.members {
+                if w::primary_button(ui, &m.name).clicked() {
+                    escolhido = Some(m.client.clone());
+                }
+            }
         });
     if let Some(client) = escolhido {
         app.escolher(client);
@@ -580,18 +580,18 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
         .show(parent, |ui| {
             ui.horizontal(|ui| {
                 let c = theme::cores();
-                // Pílula branca com as 4 abas (deixa 72 px para o FAB).
+                // Pílula branca com as 5 abas (deixa espaço para o FAB).
                 Frame::new()
                     .fill(c.card)
                     .corner_radius(255)
                     .shadow(egui::Shadow { offset: [0, 12], blur: 34, spread: 0, color: Color32::from_rgba_unmultiplied(23, 43, 99, 45) })
                     .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
-                        // Limita min E max: o with_layout filho senão estica até a borda e esconde o FAB.
-                        let largura = ui.available_width() - 100.0;
+                        // Limita min E max: nada dentro da pílula estica e empurra o FAB pra fora.
+                        let largura = (ui.available_width() - 100.0).max(0.0);
                         ui.set_min_size(Vec2::new(largura, 50.0));
                         ui.set_max_size(Vec2::new(largura, 50.0));
-                        let largura = ui.available_width() / 5.0;
+                        let aba_largura = largura / 5.0;
                         let abas = [
                             (Tab::Inicio, icon::HOUSE_LINE, "Início"),
                             (Tab::Fluxo, icon::CHART_BAR, "Fluxo"),
@@ -599,55 +599,66 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
                             (Tab::Casa, icon::HOUSE_SIMPLE, "Casa"),
                             (Tab::Consultor, icon::SPARKLE, "Consultor"),
                         ];
-                        // Pílula deslizante primeiro (por baixo dos ícones): desliza até a aba escolhida.
-                        let aba_sel = abas.iter().find(|(tab, _, _)| std::mem::discriminant(&app.tab) == std::mem::discriminant(tab));
-                        if let Some((_, _, _)) = aba_sel {
-                            let x_alvo = 6.0 + abas.iter().position(|(tab, _, _)| std::mem::discriminant(&app.tab) == std::mem::discriminant(tab)).unwrap_or(0) as f32 * largura;
-                            let x = w::tween(ui.ctx(), egui::Id::new("tab_pill"), x_alvo, 0.28, x_alvo);
-                            let pill = egui::Rect::from_min_size(pos2(x, ui.cursor().top()), Vec2::new(largura, 50.0));
-                            ui.painter().rect_filled(pill, CornerRadiusPill(), c.pill);
-                        }
-                        let mut sel_glifo = icon::HOUSE_LINE;
-                        let mut sel_label = "Início";
-                        for (tab, glifo, label) in abas {
-                            let on = std::mem::discriminant(&app.tab) == std::mem::discriminant(&tab);
-                            if on {
-                                sel_glifo = glifo;
-                                sel_label = label;
+                        // Pílula da seleção: slot criado antes do loop (fica por baixo dos ícones) e
+                        // preenchido no fim com o rect real da aba escolhida — mesmo idioma da sidebar
+                        // do desktop. O rect gravado evita recalcular margens e larguras na mão.
+                        let pill = ui.painter().add(egui::Shape::Noop);
+                        let mut rect_sel = None;
+                        // Layout explícito e abas sem espaçamento entre si: o conteúdo herdaria o
+                        // layout horizontal de fora com 8 px entre cada aba (a pílula "andava" 8 px
+                        // por aba e a pílula branca esticava 32 px a mais que o combinado com o FAB).
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            for (tab, glifo, label) in abas {
+                                let on = std::mem::discriminant(&app.tab) == std::mem::discriminant(&tab);
+                                let (rect, resp) = ui.allocate_exact_size(Vec2::new(aba_largura, 50.0), egui::Sense::click());
+                                if on {
+                                    rect_sel = Some(rect);
+                                }
+                                let centro = rect.center();
+                                let cor = if on { Color32::WHITE } else { c.faint };
+                                let (y_icone, y_label) = if on { (centro.y - 5.0, centro.y + 12.0) } else { (centro.y - 7.0, centro.y + 13.0) };
+                                ui.painter().text(pos2(centro.x, y_icone), Align2::CENTER_CENTER, glifo.to_string(), w::regular(if on { 15.0 } else { 19.0 }), cor);
+                                // Rótulo longo ("Consultor") não cabe em aba estreita: reduz a fonte se precisar.
+                                let fonte = if ui.painter().layout_no_wrap(label.to_owned(), w::semibold(9.0), cor).size().x > rect.width() - 6.0 {
+                                    8.5
+                                } else {
+                                    9.0
+                                };
+                                ui.painter().text(pos2(centro.x, y_label), Align2::CENTER_CENTER, label.to_string(), w::semibold(fonte), cor);
+                                if resp.clicked() {
+                                    app.tab = tab;
+                                }
                             }
-                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(largura, 50.0), egui::Sense::click());
-                            let centro = rect.center();
-                            let cor = if on { Color32::WHITE } else { c.faint };
-                            let (y_icone, y_label) = if on { (centro.y - 5.0, centro.y + 12.0) } else { (centro.y - 7.0, centro.y + 13.0) };
-                            ui.painter().text(pos2(centro.x, y_icone), Align2::CENTER_CENTER, glifo.to_string(), w::regular(if on { 15.0 } else { 19.0 }), cor);
-                            ui.painter().text(pos2(centro.x, y_label), Align2::CENTER_CENTER, label.to_string(), w::semibold(9.0), cor);
-                            if resp.clicked() {
-                                app.tab = tab;
-                            }
+                        });
+                        // Pílula desliza até o left da aba escolhida (0,28 s, como no desktop).
+                        if let Some(alvo) = rect_sel {
+                            let x = w::tween(ui.ctx(), egui::Id::new("tab_pill"), alvo.left(), 0.28, alvo.left());
+                            let pr = egui::Rect::from_min_size(pos2(x, alvo.top()), alvo.size());
+                            ui.painter().set(pill, egui::Shape::rect_filled(pr, corner_radius_pill(), c.pill));
                         }
                     });
-                ui.add_space(10.0);
-                // FAB azul.
-                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(62.0), egui::Sense::click());
-                ui.painter().circle_filled(rect.center(), 31.0, c.blue);
-                ui.painter().circle_filled(rect.center(), 31.0, Color32::from_rgba_unmultiplied(47, 108, 255, 110));
-                ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::PLUS.to_string(), w::bold(24.0), Color32::WHITE);
-                if resp.clicked() {
-                    app.sheet = Some(match app.tab {
-                        // Cartões só têm folha própria na demonstração (cartões reais vêm da Pluggy).
-                        Tab::Cartoes if app.demo => Sheet::Cartao(SheetCartao::default()),
-                        _ => Sheet::Entrada(SheetEntrada::default()),
-                    });
-                }
+                // FAB azul colado na borda direita: right_to_left garante o respiro da pílula em 360.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(62.0), egui::Sense::click());
+                    ui.painter().circle_filled(rect.center(), 31.0, c.blue);
+                    ui.painter().circle_filled(rect.center(), 31.0, Color32::from_rgba_unmultiplied(47, 108, 255, 110));
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::PLUS.to_string(), w::bold(24.0), Color32::WHITE);
+                    if resp.clicked() {
+                        app.sheet = Some(match app.tab {
+                            // Cartões só têm folha própria na demonstração (cartões reais vêm da Pluggy).
+                            Tab::Cartoes if app.demo => Sheet::Cartao(SheetCartao::default()),
+                            _ => Sheet::Entrada(SheetEntrada::default()),
+                        });
+                    }
+                });
             });
         });
 }
 
-fn CornerRadiusPill() -> egui::CornerRadius {
+fn corner_radius_pill() -> egui::CornerRadius {
     egui::CornerRadius::same(255)
 }
-
-
 
 /// Folha do FAB: descrição + valor + dia (demo grava no mock; real grava via worker).
 fn folha(parent: &mut Ui, app: &mut MobileApp) {
@@ -674,7 +685,12 @@ fn folha(parent: &mut Ui, app: &mut MobileApp) {
                 .corner_radius(egui::CornerRadius { nw: 24, ne: 24, ..Default::default() })
                 .inner_margin(egui::Margin { left: 18, right: 18, top: 18, bottom: 20 })
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                    // Folha sempre de borda a borda: min e max fixados pela LARGURA DA TELA (não
+                    // pelo tamanho "lembrado" da Area, que só cresce — se algum conteúdo estoura
+                    // uma linha, a folha escapava pela direita e ficava larga para sempre).
+                    let largura = ui.ctx().content_rect().width() - 36.0; // 18 de margem de cada lado
+                    ui.set_min_width(largura);
+                    ui.set_max_width(largura);
                     match &sheet {
                         Sheet::Entrada(sheet) => folha_entrada(ui, app, sheet),
                         Sheet::Cartao(sheet) => folha_cartao(ui, app, sheet),
@@ -691,9 +707,13 @@ fn folha_entrada(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetEntrada) {
     let mut desc = sheet.desc.clone();
     let mut valor = sheet.valor.clone();
     let mut dia = sheet.dia.clone();
-    campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz");
+    let primeiro = campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz");
     campo(ui, "Valor (R$)", &mut valor, "0,00");
     campo(ui, "Dia do mês", &mut dia, "1-31");
+    // Foco no primeiro campo ao abrir a folha (mesmo comportamento do form do desktop).
+    if ui.memory(|m| m.focused().is_none()) {
+        primeiro.request_focus();
+    }
     if let Some(Sheet::Entrada(s)) = app.sheet.as_mut() {
         s.desc = desc.clone();
         s.valor = valor.clone();
@@ -716,24 +736,33 @@ fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
     let mut banco_escolhido: Option<String> = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
+        let limite_linha = ui.max_rect().right();
+        let inicio_linha = ui.min_rect().left();
         for banco in bancos {
+            let logo = w::logo_key(banco).and_then(|key| w::logo_textura(key, false));
+            // Frame não participa da quebra de linha do egui (aloca o rect pronto por cima do
+            // layout, e a Area cresce pra caber): medimos o chip e quebramos a linha na mão.
+            let largura_chip = match &logo {
+                Some(logo) => (16.0 * logo.size()[0] as f32 / logo.size()[1] as f32).min(90.0) + 16.0,
+                None => ui.painter().layout_no_wrap(banco.to_owned(), w::semibold(12.0), c.ink).size().x + 16.0,
+            };
+            if ui.cursor().left() > inicio_linha && ui.cursor().left() + largura_chip > limite_linha {
+                ui.end_row();
+            }
             let escolhido = sheet.banco == *banco;
             let resp = Frame::new()
                 .fill(if escolhido { c.blue_soft } else { c.line })
                 .corner_radius(10)
                 .inner_margin(egui::Margin::symmetric(8, 6))
-                .show(ui, |ui| {
-                    let logo = w::logo_key(banco).and_then(|key| w::logo_textura(key, false));
-                    match logo {
-                        Some(logo) => {
-                            let nat = logo.size();
-                            let altura = 16.0;
-                            let largura = (altura * nat[0] as f32 / nat[1] as f32).min(90.0);
-                            ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(&logo, Vec2::new(largura, altura))));
-                        }
-                        None => {
-                            ui.label(egui::RichText::new(banco.to_string()).font(w::semibold(12.0)).color(c.ink));
-                        }
+                .show(ui, |ui| match &logo {
+                    Some(logo) => {
+                        let nat = logo.size();
+                        let altura = 16.0;
+                        let largura = (altura * nat[0] as f32 / nat[1] as f32).min(90.0);
+                        ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo, Vec2::new(largura, altura))));
+                    }
+                    None => {
+                        ui.label(egui::RichText::new(banco.to_string()).font(w::semibold(12.0)).color(c.ink));
                     }
                 })
                 .response
@@ -770,7 +799,10 @@ fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
 fn acoes_folha(ui: &mut Ui, app: &mut MobileApp, salvar: impl FnOnce(&mut MobileApp)) {
     let c = theme::cores();
     ui.horizontal(|ui| {
-        if ui.add_sized([ui.available_width() / 2.0 - 5.0, 44.0], egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14)).clicked() {
+        // Duas metades iguais com 10 px de respiro (o espaçamento é contado na largura).
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let metade = (ui.available_width() - 10.0) / 2.0;
+        if ui.add_sized([metade, 44.0], egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14)).clicked() {
             app.sheet = None;
         }
         if ui.add_sized([ui.available_width(), 44.0], egui::Button::new(egui::RichText::new("Salvar").font(w::bold(15.0)).color(Color32::WHITE)).fill(c.blue).corner_radius(14)).clicked() {
@@ -779,11 +811,12 @@ fn acoes_folha(ui: &mut Ui, app: &mut MobileApp, salvar: impl FnOnce(&mut Mobile
     });
 }
 
-fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) {
+fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) -> egui::Response {
     let c = theme::cores();
     ui.label(egui::RichText::new(rotulo).font(w::semibold(12.0)).color(c.muted));
-    ui.add_sized([ui.available_width(), 42.0], egui::TextEdit::singleline(buf).hint_text(egui::RichText::new(dica).color(c.faint)).font(w::regular(15.0)));
+    let resp = ui.add_sized([ui.available_width(), 42.0], egui::TextEdit::singleline(buf).hint_text(egui::RichText::new(dica).color(c.faint)).font(w::regular(15.0)));
     ui.add_space(6.0);
+    resp
 }
 
 /// Novo lançamento: demo grava no mock; real faz upsert no `data` e grava via worker.

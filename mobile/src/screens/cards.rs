@@ -1,17 +1,19 @@
 //! Tela Cartões — total das faturas do mês e um bloco por cartão de crédito.
 
-use egui::{Align, Color32, CornerRadius, Frame, Layout, Rect, Sense, Vec2, pos2};
+use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Vec2, pos2};
 use egui_phosphor::regular as icon;
 use flounder::widgets as w;
 
 use crate::app::{fmt_money, MobileApp};
 use crate::mock::Cartao;
+use crate::screens::home::truncar;
 use crate::theme::{self, Cores};
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let c = theme::cores();
-    // Mês por extenso em minúsculas ("dezembro") para o subtítulo do resumo.
+    // Mês por extenso em minúsculas ("dezembro") e abreviado ("dez") para os subtítulos.
     let mes = app.mes_label().split_whitespace().next().unwrap_or("").to_lowercase();
+    let mes_abr = mes.get(..3).unwrap_or(&mes).to_owned();
 
     // Resumo do mês: total das faturas + ilustração.
     let total = app.dados.cartoes.total_faturas_cents;
@@ -34,7 +36,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     // Um bloco por cartão do mês.
     for cartao in &app.dados.cartoes.cards {
         let limite_txt = fmt_money(cartao.limite_cents);
-        item(ui, cartao, &limite_txt, &c);
+        item(ui, cartao, &limite_txt, &mes_abr, &c);
     }
 
     // Adicionar cartão novo: só na demonstração (cartões reais chegam da Pluggy).
@@ -56,7 +58,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
 }
 
 /// Cartão de um banco: faixa colorida, header, fatura e limite disponível.
-fn item(ui: &mut egui::Ui, cartao: &Cartao, limite_txt: &str, c: &Cores) {
+fn item(ui: &mut egui::Ui, cartao: &Cartao, limite_txt: &str, mes_abr: &str, c: &Cores) {
     theme::card(ui, |ui| {
         // Faixa fina da cor do banco, colada no topo do conteúdo.
         let topo = ui.available_rect_before_wrap();
@@ -86,34 +88,36 @@ fn item(ui: &mut egui::Ui, cartao: &Cartao, limite_txt: &str, c: &Cores) {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
             let inicial = cartao.banco.chars().next().unwrap_or('?').to_string();
             theme::avatar(ui, rect.center(), 13.0, &inicial, cartao.cor);
-            ui.label(egui::RichText::new(cartao.banco.as_str()).font(w::semibold(15.0)).color(c.ink));
+            // Nome truncado ("…") para nunca invadir o chip de status.
+            let largura_nome = (ui.available_width() - 130.0).max(60.0);
+            let fonte_nome = w::semibold(15.0);
+            let nome = truncar(&cartao.banco, fonte_nome.clone(), c.ink, ui, largura_nome);
+            ui.label(egui::RichText::new(nome).font(fonte_nome).color(c.ink));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(egui::RichText::new(icon::CARET_RIGHT).font(w::regular(16.0)).color(c.muted));
+                // Chip padronizado: Paga (fatura paga), Aberta (fatura do mês em aberto)
+                // ou Sem fatura (não há fatura neste mês — só o saldo utilizado).
                 if cartao.paga {
                     theme::chip(ui, "Paga", c.green, c.green_soft);
-                } else {
+                } else if cartao.aberta {
                     theme::chip(ui, "Aberta", c.blue, c.blue_soft);
+                } else {
+                    theme::chip(ui, "Sem fatura", c.muted, c.line);
                 }
             });
         });
         ui.add_space(2.0);
 
-        // Prazo: mês abreviado vem do próprio label da fatura ("Fatura de dezembro" -> "dez").
-        let mes_abr: String = cartao
-            .fatura_label
-            .rsplit(' ')
-            .next()
-            .unwrap_or("dez")
-            .chars()
-            .take(3)
-            .collect();
-        let prazo = if cartao.aberta {
+        // Prazo: coerente com o chip (a abreviação do mês vem da navegação, não do label).
+        let prazo = if cartao.paga {
+            format!("fechada · vence {} {mes_abr}", cartao.vence_dia)
+        } else if cartao.aberta {
             format!("fecha em {} dias · vence {} {mes_abr}", cartao.fecha_dias, cartao.vence_dia)
         } else {
-            format!("fechada · vence {} {mes_abr}", cartao.vence_dia)
+            format!("sem fatura neste mês · vence {} {mes_abr}", cartao.vence_dia)
         };
         ui.label(egui::RichText::new(prazo).font(w::regular(12.0)).color(c.muted));
-        ui.add_space(10.0);
+        ui.add_space(12.0);
 
         // Valor da fatura em destaque.
         ui.label(egui::RichText::new(cartao.fatura_label.as_str()).font(w::regular(13.0)).color(c.muted));
@@ -141,18 +145,12 @@ fn item(ui: &mut egui::Ui, cartao: &Cartao, limite_txt: &str, c: &Cores) {
                     .color(c.muted),
             );
         });
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         let frac = if cartao.limite_cents > 0 {
             cartao.disponivel_cents as f32 / cartao.limite_cents as f32
         } else {
             0.0
         };
         theme::barra(ui, frac, cor_disp, 8.0);
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(format!("de R$ {limite_txt}"))
-                .font(w::regular(12.0))
-                .color(c.muted),
-        );
     });
 }
