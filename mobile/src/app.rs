@@ -17,6 +17,7 @@ pub enum Tab {
     Fluxo,
     Cartoes,
     Casa,
+    Consultor,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -85,6 +86,8 @@ pub struct MobileApp {
     pub data: Data,
     /// Cartões conectados (vêm na API, como no desktop).
     pub connected_cards: Option<Vec<flounder::connected::ConnectedCard>>,
+    /// Agente GLM (análises e conversa), como no desktop.
+    pub agent: flounder::assistant::Agent,
 }
 
 impl Default for MobileApp {
@@ -123,6 +126,7 @@ impl MobileApp {
             dados: mock::para(hoje.y, hoje.m as u8),
             sheet: None,
             connected_cards: None,
+            agent: Default::default(),
             demo: sessao.is_none(),
             sessao,
             parear_code: String::new(),
@@ -219,6 +223,8 @@ impl MobileApp {
                 match msg {
                     backend::Msg::State(state, entries) => carregar = Some((*state, entries)),
                     backend::Msg::Offline(e) | backend::Msg::Done(Some(e)) => nota = Some(e),
+                    backend::Msg::Reports(r) => self.agent.on_reports(r),
+                    backend::Msg::Chat(result) => self.agent.on_chat(result),
                     _ => {}
                 }
             }
@@ -309,11 +315,16 @@ pub fn fmt_money(cents: i64) -> String {
 pub fn update(app: &mut MobileApp, ui: &mut Ui) {
     app.poll_pareio();
     app.poll_remoto(ui.ctx());
+    // Trocou aba ou mês: a cascata de entrada dos cartões reinicia.
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (app.y, app.m, std::mem::discriminant(&app.tab)).hash(&mut hash);
+    flounder::widgets::begin_frame(ui.ctx(), hash.finish());
     topo(ui, app);
-    let conectado = app.sessao.as_ref().is_some_and(|c| c.loaded);
+    // Estados: pareamento (sem credencial) → conectando (sessão sem carga) → conteúdo.
     let pareando = app.sessao.is_none() && !app.demo;
-    let carregando = !pareando && !conectado;
-    if !pareando && !carregando && !app.demo {
+    let carregando = !pareando && !app.demo && !app.sessao.as_ref().is_some_and(|c| c.loaded);
+    if !pareando {
         tabbar(ui, app);
     }
     egui::CentralPanel::default()
@@ -337,10 +348,11 @@ pub fn update(app: &mut MobileApp, ui: &mut Ui) {
                     Tab::Fluxo => crate::screens::flow::show(ui, app),
                     Tab::Cartoes => crate::screens::cards::show(ui, app),
                     Tab::Casa => crate::screens::house::show(ui, app),
+                    Tab::Consultor => crate::screens::consultor::show(ui, app),
                 }
             });
         });
-    if !pareando && conectado {
+    if !pareando {
         modal_quem(ui, app);
         folha(ui, app);
     }
@@ -579,23 +591,36 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
                         let largura = ui.available_width() - 100.0;
                         ui.set_min_size(Vec2::new(largura, 50.0));
                         ui.set_max_size(Vec2::new(largura, 50.0));
-                        let largura = ui.available_width() / 4.0;
-                        for (tab, glifo, label) in [
+                        let largura = ui.available_width() / 5.0;
+                        let abas = [
                             (Tab::Inicio, icon::HOUSE_LINE, "Início"),
                             (Tab::Fluxo, icon::CHART_BAR, "Fluxo"),
                             (Tab::Cartoes, icon::CREDIT_CARD, "Cartões"),
                             (Tab::Casa, icon::HOUSE_SIMPLE, "Casa"),
-                        ] {
+                            (Tab::Consultor, icon::SPARKLE, "Consultor"),
+                        ];
+                        // Pílula deslizante primeiro (por baixo dos ícones): desliza até a aba escolhida.
+                        let aba_sel = abas.iter().find(|(tab, _, _)| std::mem::discriminant(&app.tab) == std::mem::discriminant(tab));
+                        if let Some((_, _, _)) = aba_sel {
+                            let x_alvo = 6.0 + abas.iter().position(|(tab, _, _)| std::mem::discriminant(&app.tab) == std::mem::discriminant(tab)).unwrap_or(0) as f32 * largura;
+                            let x = w::tween(ui.ctx(), egui::Id::new("tab_pill"), x_alvo, 0.28, x_alvo);
+                            let pill = egui::Rect::from_min_size(pos2(x, ui.cursor().top()), Vec2::new(largura, 50.0));
+                            ui.painter().rect_filled(pill, CornerRadiusPill(), c.pill);
+                        }
+                        let mut sel_glifo = icon::HOUSE_LINE;
+                        let mut sel_label = "Início";
+                        for (tab, glifo, label) in abas {
                             let on = std::mem::discriminant(&app.tab) == std::mem::discriminant(&tab);
+                            if on {
+                                sel_glifo = glifo;
+                                sel_label = label;
+                            }
                             let (rect, resp) = ui.allocate_exact_size(Vec2::new(largura, 50.0), egui::Sense::click());
                             let centro = rect.center();
-                            if on {
-                                ui.painter().rect_filled(rect, CornerRadiusPill(), c.pill);
-                            }
                             let cor = if on { Color32::WHITE } else { c.faint };
                             let (y_icone, y_label) = if on { (centro.y - 5.0, centro.y + 12.0) } else { (centro.y - 7.0, centro.y + 13.0) };
                             ui.painter().text(pos2(centro.x, y_icone), Align2::CENTER_CENTER, glifo.to_string(), w::regular(if on { 15.0 } else { 19.0 }), cor);
-                            ui.painter().text(pos2(centro.x, y_label), Align2::CENTER_CENTER, label.to_string(), w::semibold(9.5), cor);
+                            ui.painter().text(pos2(centro.x, y_label), Align2::CENTER_CENTER, label.to_string(), w::semibold(9.0), cor);
                             if resp.clicked() {
                                 app.tab = tab;
                             }
@@ -621,6 +646,8 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
 fn CornerRadiusPill() -> egui::CornerRadius {
     egui::CornerRadius::same(255)
 }
+
+
 
 /// Folha do FAB: descrição + valor + dia (demo grava no mock; real grava via worker).
 fn folha(parent: &mut Ui, app: &mut MobileApp) {

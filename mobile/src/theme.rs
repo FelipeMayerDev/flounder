@@ -1,6 +1,6 @@
 //! Tema do mobile: paleta do mockup, cartões arredondados e dinheiro com centavos menores.
 
-use egui::{Align2, Color32, CornerRadius, Frame, Layout, Pos2, Response, Sense, Stroke, Ui, Vec2, pos2};
+use egui::{pos2, vec2, Align, Align2, Color32, CornerRadius, Frame, Layout, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 use flounder::widgets as w;
 
 pub struct Cores {
@@ -43,16 +43,53 @@ pub fn cores() -> Cores {
     }
 }
 
+/// Progresso (0–1) da entrada do próximo cartão: cada um começa 45 ms depois do anterior.
+/// Igual ao desktop (widgets::entrance): reiniciado por `flounder::widgets::begin_frame`.
+pub fn entrada(ui: &mut Ui) -> f32 {
+    let ctx = ui.ctx().clone();
+    if !w::motion(&ctx) {
+        return 1.0;
+    }
+    let (n, start) = ctx.data_mut(|d| {
+        let n = d.get_temp_mut_or(egui::Id::new("card_n"), 0usize);
+        *n += 1;
+        (*n - 1, d.get_temp::<f64>(egui::Id::new("view_start")).unwrap_or(0.0))
+    });
+    let t = ((ctx.input(|i| i.time) - start) as f32 - n.min(12) as f32 * 0.045) / 0.42;
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
 /// Cartão branco arredondado do mockup; já adiciona o espaço entre cartões.
+/// Entrada em cascata: opacidade + descida curta, sem mover o layout seguinte.
 pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     let c = cores();
+    let entrar = entrada(ui);
+    let dy = (1.0 - entrar) * 14.0;
+    let antes = ui.cursor().translate(vec2(0.0, dy));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(
+                antes.min,
+                Vec2::new(antes.width(), ui.available_height()),
+            ))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    child.set_opacity(entrar);
     Frame::new()
         .fill(c.card)
         .corner_radius(22)
         .shadow(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_rgba_unmultiplied(23, 43, 99, 18) })
         .inner_margin(18.0)
-        .show(ui, |ui| add(ui));
-    ui.add_space(12.0);
+        .show(&mut child, |ui| add(ui));
+    let altura = child.min_rect().height();
+    ui.advance_cursor_after_rect(Rect::from_min_size(
+        ui.cursor().min,
+        Vec2::new(ui.available_width(), altura + 12.0),
+    ));
 }
 
 /// "R$ 5.304,28" — inteiro bold grande, centavos menores (como no mockup).
