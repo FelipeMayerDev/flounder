@@ -37,9 +37,7 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                     );
                 });
             });
-            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
-                ui.label(egui::RichText::new("👛").size(42.0));
-            });
+            w::art(ui, w::Art::MoneyBag, 54.0);
         });
         ui.add_space(12.0);
 
@@ -111,9 +109,7 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                     .font(w::bold(16.0))
                     .color(c.ink),
             );
-            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
-                ui.label(egui::RichText::new("📅").size(36.0));
-            });
+            w::art(ui, w::Art::SpiralCalendar, 46.0);
         });
         ui.add_space(6.0);
         theme::money(ui, total_dia, 28.0, c.ink);
