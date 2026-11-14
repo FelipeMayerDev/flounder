@@ -18,8 +18,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
 fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     let negativo = app.dados.saldo.centavos < 0;
     theme::card(ui, |ui| {
-        // Cabeçalho: título + ⓘ e o 👛 encostado no topo direito.
-        ui.horizontal(|ui| {
+        // Cabeçalho: título + ⓘ à esquerda; a ilustração 3D alinhada pelo topo com o título.
+        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Saldo previsto").font(w::bold(16.0)).color(c.ink));
@@ -131,7 +131,7 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
         .unwrap_or(app.dados.pagar.total_cents);
 
     theme::card(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
             ui.label(
                 egui::RichText::new(format!("Contas a pagar · dia {dia_sel}"))
                     .font(w::bold(16.0))

@@ -28,7 +28,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(egui::RichText::new("💳").size(42.0));
+                w::art(ui, w::Art::Card, 46.0);
             });
         });
     });
