@@ -44,7 +44,24 @@ pub fn mes(
 
     // Contas a pagar: bills do mês (entradas + faturas) agrupadas por dia, só as não pagas.
     let mut dias: Vec<(u8, u8, i64)> = Vec::new();
+    let mut contas: Vec<mock::ContaPagar> = Vec::new();
     for bill in &s.bills {
+        let acao = match &bill.target {
+            flounder::model::BillRef::Entry(id) => mock::Acao::Entrada(*id),
+            flounder::model::BillRef::Connected(i) => data
+                .connected_invoices
+                .get(*i)
+                .map(|inv| mock::Acao::Fatura { card: inv.card.clone(), due: format!("{:04}-{:02}-{:02}", inv.due.y, inv.due.m, inv.due.d) })
+                .unwrap_or(mock::Acao::Nenhuma),
+            _ => mock::Acao::Nenhuma,
+        };
+        contas.push(mock::ContaPagar {
+            dia: bill.date.d as u8,
+            label: bill.label.clone(),
+            total_cents: bill.amount,
+            paga: bill.status == flounder::model::Status::Paid,
+            acao,
+        });
         if bill.status == flounder::model::Status::Paid {
             continue;
         }
@@ -57,9 +74,11 @@ pub fn mes(
         }
     }
     dias.sort_by_key(|(d, _, _)| *d);
+    contas.sort_by_key(|c| (c.dia, std::cmp::Reverse(c.total_cents)));
     let pagar = mock::Pagar {
         dia: dias.first().map(|(d, _, _)| *d).unwrap_or(1),
         total_cents: s.to_pay,
+        contas,
         dias,
     };
 
@@ -137,6 +156,20 @@ pub fn mes(
         total_contas: casa_bills.len() as u8,
         pendentes_qtd: casa_bills.iter().filter(|b| !b.paga).count() as u8,
         pendentes_total_cents: casa_bills.iter().filter(|b| !b.paga).map(|b| b.total_cents).sum(),
+        saldo_acerto: s.settlement,
+        acertos: data
+            .settlements
+            .iter()
+            .filter(|a| flounder::model::Month::of(a.date) == month)
+            .map(|a| mock::Acerto {
+                id: a.id.clone(),
+                de: a.from.idx(),
+                valor_cents: a.amount,
+                dia: a.date.d as u8,
+                mes: a.date.m as u8,
+                ano: a.date.y,
+            })
+            .collect(),
         bills: casa_bills,
     };
 
@@ -152,6 +185,7 @@ pub fn mes(
             .and_then(|id| connected_cards.unwrap_or(&[]).iter().find(|c| c.id == *id))
             .map(|c| c.institution.clone());
         let entrada = Entrada {
+            id: e.id,
             desc: e.desc.clone(),
             centavos,
             membro: e.owner.idx(),

@@ -47,6 +47,26 @@ pub struct Pagar {
     pub total_cents: i64,
     /// (dia, qtd, total) da tira horizontal.
     pub dias: Vec<(u8, u8, i64)>,
+    /// Contas do mês com a ação de cada uma ao marcar paga.
+    pub contas: Vec<ContaPagar>,
+}
+
+#[derive(Clone)]
+pub enum Acao {
+    /// Lançamento simples: alterna `paid` e grava por `Cmd::Entry`.
+    Entrada(u32),
+    /// Fatura de cartão conectado: `Cmd::BillPaid`.
+    Fatura { card: String, due: String },
+    /// Fatura manual (demo): nada a gravar.
+    Nenhuma,
+}
+
+pub struct ContaPagar {
+    pub dia: u8,
+    pub label: String,
+    pub total_cents: i64,
+    pub paga: bool,
+    pub acao: Acao,
 }
 
 pub struct Cartoes {
@@ -74,6 +94,19 @@ pub struct Casa {
     pub pendentes_qtd: u8,
     pub pendentes_total_cents: i64,
     pub bills: Vec<ContaCasa>,
+    /// Acerto acumulado: > 0 = {nome[1]} deve para {nome[0]}, < 0 o contrário.
+    pub saldo_acerto: i64,
+    /// Acertos registrados (mais recente primeiro).
+    pub acertos: Vec<Acerto>,
+}
+
+pub struct Acerto {
+    pub id: String,
+    pub de: usize,
+    pub valor_cents: i64,
+    pub dia: u8,
+    pub mes: u8,
+    pub ano: i32,
 }
 
 pub struct ContaCasa {
@@ -96,6 +129,8 @@ pub struct DiaFluxo {
 }
 
 pub struct Entrada {
+    /// Id local da entrada (fase 2: tocar para editar/excluir).
+    pub id: u32,
     pub desc: String,
     pub centavos: i64,
     pub membro: usize,
@@ -109,7 +144,7 @@ pub fn para(y: i32, m: u8) -> Mes {
     match (y, m) {
         (2026, 12) => dezembro(),
         (2026, 11) => novembro(),
-        _ => Mes { vazio: true, salario_cents: 0, saldo: Saldo { centavos: 0, pct_livre: 0 }, reparticao: vec![], pagar: Pagar { dia: 1, total_cents: 0, dias: vec![] }, cartoes: Cartoes { total_faturas_cents: 0, cards: vec![] }, casa: Casa { total_contas: 0, pendentes_qtd: 0, pendentes_total_cents: 0, bills: vec![] }, fluxo: vec![] },
+        _ => Mes { vazio: true, salario_cents: 0, saldo: Saldo { centavos: 0, pct_livre: 0 }, reparticao: vec![], pagar: Pagar { dia: 1, total_cents: 0, contas: vec![], dias: vec![] }, cartoes: Cartoes { total_faturas_cents: 0, cards: vec![] }, casa: Casa { total_contas: 0, pendentes_qtd: 0, pendentes_total_cents: 0, saldo_acerto: 0, acertos: vec![], bills: vec![] }, fluxo: vec![] },
     }
 }
 
@@ -133,6 +168,7 @@ fn dezembro() -> Mes {
         pagar: Pagar {
             dia: 5,
             total_cents: 1_937_950,
+            contas: vec![],
             dias: vec![
                 (5, 4, 1_937_950),
                 (8, 1, 84_900),
@@ -178,6 +214,8 @@ fn dezembro() -> Mes {
             total_contas: 7,
             pendentes_qtd: 7,
             pendentes_total_cents: 1_533_244,
+            saldo_acerto: 0,
+            acertos: vec![],
             bills: vec![
                 ContaCasa { id: 0, nome: "Apartamento Vila Mariana".into(), dia: 1, total_cents: 233_254, aproximado: true, pagador: 1, parte_cents: 116_627, paga: false },
                 ContaCasa { id: 0, nome: "Aluguel".into(), dia: 1, total_cents: 480_000, aproximado: false, pagador: 1, parte_cents: 240_000, paga: false },
@@ -190,33 +228,33 @@ fn dezembro() -> Mes {
         },
         fluxo: vec![
             DiaFluxo { dia: 1, entradas: vec![
-                Entrada { desc: "Apartamento Vila Mariana".into(), centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
-                Entrada { desc: "Aluguel".into(), centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
-                Entrada { desc: "Condomínio".into(), centavos: -158_000, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Apartamento Vila Mariana".into(), centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Aluguel".into(), centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Condomínio".into(), centavos: -158_000, membro: 0, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 3, entradas: vec![
-                Entrada { desc: "iFood".into(), centavos: -8_460, membro: 0, shared: false, card: Some("Santander Unique".into()), paid: false },
+                Entrada { id: 0, desc: "iFood".into(), centavos: -8_460, membro: 0, shared: false, card: Some("Santander Unique".into()), paid: false },
             ] },
             DiaFluxo { dia: 5, entradas: vec![
-                Entrada { desc: "Salário".into(), centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
-                Entrada { desc: "Luz".into(), centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Salário".into(), centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
+                Entrada { id: 0, desc: "Luz".into(), centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 6, entradas: vec![
-                Entrada { desc: "Mercado do bairro".into(), centavos: -31_270, membro: 1, shared: false, card: Some("Santander Unique".into()), paid: false },
+                Entrada { id: 0, desc: "Mercado do bairro".into(), centavos: -31_270, membro: 1, shared: false, card: Some("Santander Unique".into()), paid: false },
             ] },
             DiaFluxo { dia: 10, entradas: vec![
-                Entrada { desc: "Internet".into(), centavos: -12_990, membro: 0, shared: true, card: None, paid: true },
-                Entrada { desc: "Netflix".into(), centavos: -5_590, membro: 1, shared: false, card: Some("Nubank".into()), paid: false },
+                Entrada { id: 0, desc: "Internet".into(), centavos: -12_990, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Netflix".into(), centavos: -5_590, membro: 1, shared: false, card: Some("Nubank".into()), paid: false },
             ] },
             DiaFluxo { dia: 12, entradas: vec![
-                Entrada { desc: "Freelance de design".into(), centavos: 150_000, membro: 1, shared: false, card: None, paid: true },
-                Entrada { desc: "Farmácia".into(), centavos: -8_730, membro: 0, shared: false, card: Some("Nubank".into()), paid: false },
+                Entrada { id: 0, desc: "Freelance de design".into(), centavos: 150_000, membro: 1, shared: false, card: None, paid: true },
+                Entrada { id: 0, desc: "Farmácia".into(), centavos: -8_730, membro: 0, shared: false, card: Some("Nubank".into()), paid: false },
             ] },
             DiaFluxo { dia: 15, entradas: vec![
-                Entrada { desc: "Plano de saúde".into(), centavos: -560_300, membro: 1, shared: true, card: None, paid: false },
+                Entrada { id: 0, desc: "Plano de saúde".into(), centavos: -560_300, membro: 1, shared: true, card: None, paid: false },
             ] },
             DiaFluxo { dia: 20, entradas: vec![
-                Entrada { desc: "Água".into(), centavos: -54_700, membro: 0, shared: true, card: None, paid: false },
+                Entrada { id: 0, desc: "Água".into(), centavos: -54_700, membro: 0, shared: true, card: None, paid: false },
             ] },
         ],
     }
@@ -233,7 +271,7 @@ fn novembro() -> Mes {
             Reparte { label: "Dia a dia".into(), centavos: 318_850, pct: 12, cor: Color32::from_rgb(143, 176, 255) },
             Reparte { label: "Sobra".into(), centavos: 312_650, pct: 11, cor: Color32::from_rgb(18, 183, 106) },
         ],
-        pagar: Pagar { dia: 1, total_cents: 871_254, dias: vec![(1, 3, 871_254), (5, 1, 34_000)] },
+        pagar: Pagar { dia: 1, total_cents: 871_254, contas: vec![], dias: vec![(1, 3, 871_254), (5, 1, 34_000)] },
         cartoes: Cartoes {
             total_faturas_cents: 921_400,
             cards: vec![
@@ -245,19 +283,21 @@ fn novembro() -> Mes {
             total_contas: 7,
             pendentes_qtd: 0,
             pendentes_total_cents: 0,
-            bills: dezembro().casa.bills.into_iter().map(|mut b| { b.paga = true; b }).collect(),
+            saldo_acerto: 0,
+            acertos: vec![],
+            bills: dezembro().casa.bills.into_iter().map(|mut b| { b.id = 0; b.paga = true; b }).collect(),
         },
         fluxo: vec![
             DiaFluxo { dia: 1, entradas: vec![
-                Entrada { desc: "Apartamento Vila Mariana".into(), centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
-                Entrada { desc: "Aluguel".into(), centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Apartamento Vila Mariana".into(), centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Aluguel".into(), centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 5, entradas: vec![
-                Entrada { desc: "Salário".into(), centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
-                Entrada { desc: "Luz".into(), centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Salário".into(), centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
+                Entrada { id: 0, desc: "Luz".into(), centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 12, entradas: vec![
-                Entrada { desc: "Presente de aniversário".into(), centavos: -12_000, membro: 1, shared: false, card: None, paid: false },
+                Entrada { id: 0, desc: "Presente de aniversário".into(), centavos: -12_000, membro: 1, shared: false, card: None, paid: false },
             ] },
         ],
     }

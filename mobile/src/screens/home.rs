@@ -5,7 +5,7 @@ use egui_phosphor::regular as icon;
 use flounder::widgets as w;
 
 use crate::app::{MobileApp, fmt_money};
-use crate::mock::ContaCasa;
+use crate::mock;
 use crate::theme::{self, Cores};
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
@@ -113,7 +113,8 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     });
 }
 
-/// Card "Contas a pagar": total do dia em destaque, tira de dias e as contas daquele dia.
+/// Card "Contas a pagar": pendente do dia selecionado, tira de dias tocável e a lista
+/// das contas do dia com bolinha de pago (toque alterna; demo inverte localmente).
 fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     // Dia selecionado na tira (lembra entre frames; padrão = destaque do mock).
     let lembrado = ui.memory(|m| m.data.get_temp::<u8>(egui::Id::new("pagar-dia")));
@@ -121,14 +122,33 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
         Some(d) if app.dados.pagar.dias.iter().any(|x| x.0 == d) => d,
         _ => app.dados.pagar.dia,
     };
-    let total_dia = app
+    // Contas do dia selecionado, com o índice original em `pagar.contas` (a demo
+    // inverte `paga` por índice). Cópias donas: o card muta `app` ao alternar,
+    // então não pode segurar empréstimo da view-model durante o desenho.
+    let contas_do_dia: Vec<(usize, String, i64, bool, mock::Acao)> = app
         .dados
         .pagar
-        .dias
+        .contas
         .iter()
-        .find(|x| x.0 == dia_sel)
-        .map(|x| x.2)
-        .unwrap_or(app.dados.pagar.total_cents);
+        .enumerate()
+        .filter(|(_, ct)| ct.dia == dia_sel)
+        .map(|(i, ct)| (i, ct.label.clone(), ct.total_cents, ct.paga, ct.acao.clone()))
+        .collect();
+    let tem_contas = !contas_do_dia.is_empty();
+    // Resumo do dia: total não pago, recalculado das contas do dia (a tira não se
+    // atualiza na demo, onde alternar é só local; sem contas, cai no total da tira).
+    let pendente_dia = if tem_contas {
+        contas_do_dia.iter().filter(|ct| !ct.3).map(|ct| ct.2).sum::<i64>()
+    } else {
+        app.dados
+            .pagar
+            .dias
+            .iter()
+            .find(|x| x.0 == dia_sel)
+            .map(|x| x.2)
+            .unwrap_or(app.dados.pagar.total_cents)
+    };
+    let todo_pago = tem_contas && pendente_dia == 0;
 
     theme::card(ui, |ui| {
         ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
@@ -140,7 +160,16 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
             w::art(ui, w::Art::SpiralCalendar, 46.0);
         });
         ui.add_space(8.0);
-        theme::money(ui, total_dia, 28.0, c.ink);
+        // Resumo do dia: verde quando o dia já está todo pago.
+        theme::money(ui, pendente_dia, 28.0, if todo_pago { c.green } else { c.ink });
+        if tem_contas {
+            ui.add_space(2.0);
+            if todo_pago {
+                ui.label(egui::RichText::new("Tudo pago neste dia.").font(w::semibold(12.0)).color(c.green));
+            } else {
+                ui.label(egui::RichText::new("Pendente neste dia").font(w::regular(12.0)).color(c.muted));
+            }
+        }
         ui.add_space(16.0);
 
         // Tira horizontal de dias; toque seleciona.
@@ -153,24 +182,47 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(10.0);
 
-        // Contas do dia selecionado; sem contas, mostra as próximas do mês.
-        let do_dia: Vec<&ContaCasa> = app.dados.casa.bills.iter().filter(|b| b.dia == dia_sel).collect();
-        if do_dia.is_empty() {
-            ui.label(egui::RichText::new("próximas contas").font(w::regular(12.0)).color(c.muted));
-            ui.add_space(2.0);
-            let mut todas: Vec<&ContaCasa> = app.dados.casa.bills.iter().collect();
-            todas.sort_by_key(|b| b.dia);
-            for b in todas.into_iter().take(3) {
-                linha_conta(ui, b, c);
-            }
+        // Contas do dia selecionado; toque na bolinha alterna pago.
+        if contas_do_dia.is_empty() {
+            ui.label(egui::RichText::new("Nenhuma conta neste dia.").font(w::regular(12.0)).color(c.muted));
         } else {
-            for b in do_dia {
-                linha_conta(ui, b, c);
+            for (idx, label, total_cents, paga, acao) in &contas_do_dia {
+                ui.horizontal(|ui| {
+                    let bolinha = theme::bolinha_check(ui, *paga, c.green);
+                    if bolinha.clicked() {
+                        alternar_conta(app, *idx, acao);
+                    }
+                    ui.add_space(2.0);
+                    // Nome truncado ("…") para nunca invadir o valor alinhado à direita;
+                    // pago fica mudo, como nas contas da casa.
+                    let cor = if *paga { c.muted } else { c.ink };
+                    let largura_nome = (ui.available_width() - 120.0).max(60.0);
+                    let fonte_nome = w::regular(14.0);
+                    let nome = truncar(label, fonte_nome.clone(), cor, ui, largura_nome);
+                    ui.label(egui::RichText::new(nome).font(fonte_nome).color(cor));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        theme::money(ui, *total_cents, 14.0, cor);
+                    });
+                });
+                ui.add_space(8.0);
             }
         }
     });
+}
+
+/// Toque na bolinha de uma conta: na demo (ou quando a conta não tem ação gravável)
+/// inverte `paga` localmente, para a demonstração ficar viva; na sessão real chama
+/// `alternar_pago`, que grava via worker e recalcula a view-model.
+fn alternar_conta(app: &mut MobileApp, idx: usize, acao: &mock::Acao) {
+    if app.demo || matches!(acao, mock::Acao::Nenhuma) {
+        if let Some(conta) = app.dados.pagar.contas.get_mut(idx) {
+            conta.paga = !conta.paga;
+        }
+        return;
+    }
+    app.alternar_pago(acao);
 }
 
 /// Caixinha da tira: dia em cima, total curto embaixo; azul quando selecionada.
@@ -207,24 +259,6 @@ fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &C
     if resp.clicked() {
         ui.memory_mut(|m| m.data.insert_temp(egui::Id::new("pagar-dia"), dia));
     }
-}
-
-/// Linha "nome ..... R$ valor" de uma conta da casa.
-fn linha_conta(ui: &mut egui::Ui, b: &ContaCasa, c: &Cores) {
-    ui.horizontal(|ui| {
-        // Nome truncado ("…") para nunca invadir o valor alinhado à direita.
-        let largura_nome = (ui.available_width() - 120.0).max(60.0);
-        let fonte_nome = w::regular(14.0);
-        let nome = truncar(&b.nome, fonte_nome.clone(), c.ink, ui, largura_nome);
-        ui.label(egui::RichText::new(nome).font(fonte_nome).color(c.ink));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            theme::money(ui, b.total_cents, 14.0, c.ink);
-            if b.aproximado {
-                ui.label(egui::RichText::new("≈").font(w::semibold(13.0)).color(c.muted));
-            }
-        });
-    });
-    ui.add_space(8.0);
 }
 
 /// Total curto para a tira: corta os centavos ("R$ 849", "R$ 8.712") e abrevia

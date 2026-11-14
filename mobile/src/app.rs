@@ -48,8 +48,11 @@ pub struct SheetCartao {
 
 #[derive(Clone)]
 pub enum Sheet {
-    Entrada(SheetEntrada),
+    /// Novo lançamento completo — UI e estado em `screens/lancamento.rs`.
+    Lancamento(crate::screens::lancamento::Folha),
     Cartao(SheetCartao),
+    /// Ajustes (menu ☰): quem usa o celular, versão.
+    Menu,
 }
 
 /// Sessão real com o backend (worker do desktop reutilizado).
@@ -86,6 +89,8 @@ pub struct MobileApp {
     pub data: Data,
     /// Cartões conectados (vêm na API, como no desktop).
     pub connected_cards: Option<Vec<flounder::connected::ConnectedCard>>,
+    /// Faturas conectadas do espelho (para alternar pago nas contas).
+    pub connected_invoices: Vec<flounder::model::ConnectedInvoice>,
     /// Agente GLM (análises e conversa), como no desktop.
     pub agent: flounder::assistant::Agent,
 }
@@ -132,6 +137,7 @@ impl MobileApp {
             dados: mock::para(hoje.y, hoje.m as u8),
             sheet: None,
             connected_cards: None,
+            connected_invoices: Vec::new(),
             agent: Default::default(),
             demo: sessao.is_none(),
             sessao,
@@ -147,6 +153,148 @@ impl MobileApp {
         if let Some(w) = self.sessao.as_mut().and_then(|c| c.worker.as_mut()) {
             w.save(cmd);
         }
+    }
+
+    // ─── Ganchos de escrita usados pelas telas (demo grava no mock; real no backend) ──
+
+    /// Salva um lançamento novo ou editado e espelha na view-model.
+    pub fn salvar_entrada(&mut self, entrada: flounder::model::Entry) {
+        if self.demo {
+            let dia = entrada.date.d;
+            let mock_e = mock::Entrada {
+                id: 0,
+                desc: entrada.desc.clone(),
+                centavos: if entrada.kind == Kind::Income { entrada.amount } else { -entrada.amount },
+                membro: entrada.owner.idx(),
+                shared: entrada.shared,
+                card: entrada.connected.as_deref().and_then(|id| {
+                    self.connected_cards.as_ref().and_then(|cs| cs.iter().find(|c| c.id == *id)).map(|c| c.institution.clone())
+                }),
+                paid: entrada.paid,
+            };
+            match self.dados.fluxo.iter_mut().find(|d| d.dia == dia as u8) {
+                Some(d) => d.entradas.push(mock_e),
+                None => self.dados.fluxo.push(mock::DiaFluxo { dia: dia as u8, entradas: vec![mock_e] }),
+            }
+            self.dados.fluxo.sort_by_key(|d| d.dia);
+            self.atualizar_mes();
+            return;
+        }
+        let id = self.data.upsert(entrada);
+        if let Some(e) = self.data.entry(id) {
+            self.enviar(backend::Cmd::Entry(e.clone()));
+        }
+        self.atualizar_mes();
+    }
+
+    /// Marca/desmarca pago (lançamento ou fatura) e grava via worker.
+    pub fn alternar_pago(&mut self, acao: &mock::Acao) {
+        let month = Month { y: self.y, m: self.m as u32 };
+        match acao {
+            mock::Acao::Entrada(id) => {
+                self.data.toggle(BillRef::Entry(*id), month);
+                if let Some(e) = self.data.entry(*id) {
+                    self.enviar(backend::Cmd::Entry(e.clone()));
+                }
+            }
+            mock::Acao::Fatura { card, due } => {
+                let Some(pos) = self.connected_invoices.iter().position(|inv| {
+                    inv.card == *card && format!("{:04}-{:02}-{:02}", inv.due.y, inv.due.m, inv.due.d) == *due
+                }) else { return };
+                self.data.toggle(BillRef::Connected(pos), month);
+                let pago = self.data.connected_invoices[pos].paid;
+                self.enviar(backend::Cmd::BillPaid(flounder::api::BillPaid {
+                    card: card.clone(),
+                    due: due.clone(),
+                    paid: pago,
+                }));
+            }
+            mock::Acao::Nenhuma => {}
+        }
+        self.atualizar_mes();
+    }
+
+    /// Exclui um lançamento e grava via worker.
+    pub fn excluir_entrada(&mut self, id: u32) {
+        if self.demo {
+            for d in &mut self.dados.fluxo {
+                d.entradas.retain(|e| e.id != id);
+            }
+            self.dados.fluxo.retain(|d| !d.entradas.is_empty());
+            self.atualizar_mes();
+            return;
+        }
+        self.data.entries.retain(|e| e.id != id);
+        self.enviar(backend::Cmd::Delete(id));
+        self.atualizar_mes();
+    }
+
+    /// Copia os lançamentos manuais do mês anterior (como o desktop).
+    pub fn copiar_mes_anterior(&mut self) {
+        if self.demo {
+            return;
+        }
+        let month = Month { y: self.y, m: self.m as u32 };
+        for id in self.data.copy_previous(month, None) {
+            if let Some(e) = self.data.entry(id) {
+                self.enviar(backend::Cmd::Entry(e.clone()));
+            }
+        }
+        self.atualizar_mes();
+    }
+
+    /// Registra um acerto (quem pagou a mais) e grava via worker.
+    pub fn registrar_acerto(&mut self, valor_cents: i64, de: usize) {
+        if self.demo {
+            self.dados.casa.saldo_acerto += if de == 0 { valor_cents } else { -valor_cents };
+            self.dados.casa.acertos.push(mock::Acerto {
+                id: format!("local-demo-{}", self.dados.casa.acertos.len()),
+                de,
+                valor_cents,
+                dia: flounder::model::today().d as u8,
+                mes: self.m,
+                ano: self.y,
+            });
+            self.atualizar_mes();
+            return;
+        }
+        let hoje = flounder::model::today();
+        let de_p = if de == 1 { Person::B } else { Person::A };
+        let acerto = flounder::model::Settlement { id: String::new(), date: hoje, amount: valor_cents, from: de_p };
+        let id = self.data.add_settlement(acerto.clone());
+        self.enviar(backend::Cmd::Settle(flounder::model::Settlement { id, date: hoje, amount: valor_cents, from: de_p }));
+        self.atualizar_mes();
+    }
+
+    /// Desfaz um acerto pelo id e grava via worker.
+    pub fn desfazer_acerto(&mut self, id: String) {
+        if self.demo {
+            self.dados.casa.acertos.retain(|a| a.id != id);
+            self.atualizar_mes();
+            return;
+        }
+        self.data.settlements.retain(|a| a.id != id);
+        self.enviar(backend::Cmd::Unsettle(id));
+        self.atualizar_mes();
+    }
+
+    /// Troca quem usa o celular quando há token do membro; senão pede re-pareamento.
+    pub fn trocar_membro(&mut self, client: String) -> bool {
+        if self.demo {
+            self.eu = if client == "client-2" { 1 } else { 0 };
+            self.data.me = if client == "client-2" { Person::B } else { Person::A };
+            self.atualizar_mes();
+            return true;
+        }
+        let Some(cx) = self.sessao.as_mut() else { return false };
+        let token = backend::env_token(&client).unwrap_or_default();
+        if token.is_empty() {
+            return false;
+        }
+        *cx = Conexao { me: Some(client), token, ..Default::default() };
+        self.eu = if cx.me.as_deref() == Some("client-2") { 1 } else { 0 };
+        self.atualizar_mes();
+        true
     }
 
     /// Recalcula a view-model do mês aberto (real ou demo).
@@ -495,8 +643,7 @@ fn topo(parent: &mut Ui, app: &mut MobileApp) {
             ui.horizontal(|ui| {
                 let c = theme::cores();
                 if botao_icone(ui, icon::LIST, "Menu") {
-                    // Alternar quem usa o celular: recarrega os dados do mês (as listas trocam o "você").
-                    app.eu = (app.eu + 1) % 2;
+                    app.sheet = Some(Sheet::Menu);
                 }
                 let (nome_eu, cor_eu) = MEMBROS[app.eu];
                 let (nome_outro, cor_outro) = MEMBROS[1 - app.eu];
@@ -648,7 +795,7 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
                         app.sheet = Some(match app.tab {
                             // Cartões só têm folha própria na demonstração (cartões reais vêm da Pluggy).
                             Tab::Cartoes if app.demo => Sheet::Cartao(SheetCartao::default()),
-                            _ => Sheet::Entrada(SheetEntrada::default()),
+                            _ => Sheet::Lancamento(crate::screens::lancamento::Folha::default()),
                         });
                     }
                 });
@@ -692,38 +839,12 @@ fn folha(parent: &mut Ui, app: &mut MobileApp) {
                     ui.set_min_width(largura);
                     ui.set_max_width(largura);
                     match &sheet {
-                        Sheet::Entrada(sheet) => folha_entrada(ui, app, sheet),
+                        Sheet::Lancamento(folha) => crate::screens::lancamento::folha(ui, app, folha),
                         Sheet::Cartao(sheet) => folha_cartao(ui, app, sheet),
+                        Sheet::Menu => crate::screens::ajustes::folha(ui, app),
                     }
                 });
         });
-}
-
-fn folha_entrada(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetEntrada) {
-    let c = theme::cores();
-    ui.label(egui::RichText::new("Novo lançamento").font(w::bold(17.0)).color(c.ink));
-    ui.label(egui::RichText::new(format!("Entra no fluxo de {}", app.mes_label())).font(w::regular(13.0)).color(c.muted));
-    ui.add_space(10.0);
-    let mut desc = sheet.desc.clone();
-    let mut valor = sheet.valor.clone();
-    let mut dia = sheet.dia.clone();
-    let primeiro = campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz");
-    campo(ui, "Valor (R$)", &mut valor, "0,00");
-    campo(ui, "Dia do mês", &mut dia, "1-31");
-    // Foco no primeiro campo ao abrir a folha (mesmo comportamento do form do desktop).
-    if ui.memory(|m| m.focused().is_none()) {
-        primeiro.request_focus();
-    }
-    if let Some(Sheet::Entrada(s)) = app.sheet.as_mut() {
-        s.desc = desc.clone();
-        s.valor = valor.clone();
-        s.dia = dia.clone();
-    }
-    if sheet.tried {
-        ui.label(egui::RichText::new("Preencha descrição, valor e dia.").font(w::regular(12.0)).color(c.red));
-    }
-    ui.add_space(14.0);
-    acoes_folha(ui, app, |app| salvar_lancamento(app));
 }
 
 fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
@@ -820,53 +941,6 @@ fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) -> egui::Respo
 }
 
 /// Novo lançamento: demo grava no mock; real faz upsert no `data` e grava via worker.
-fn salvar_lancamento(app: &mut MobileApp) {
-    let Some(Sheet::Entrada(sheet)) = app.sheet.as_ref().cloned() else { return };
-    let bruto = sheet.valor.trim().replace('.', "").replace(',', ".");
-    let centavos = (bruto.parse::<f64>().unwrap_or(0.0) * 100.0).round() as i64;
-    let dia: u8 = sheet.dia.trim().parse().unwrap_or(0);
-    if sheet.desc.trim().is_empty() || centavos == 0 || dia == 0 || dia > 31 {
-        if let Some(Sheet::Entrada(s)) = app.sheet.as_mut() {
-            s.tried = true;
-        }
-        return;
-    }
-    let desc = sheet.desc.trim().to_owned();
-    app.sheet = None;
-    let desc_demo = desc.clone();
-    if !app.demo {
-        let entrada = Entry {
-            id: 0,
-            desc,
-            amount: centavos,
-            date: flounder::model::Date { y: app.y, m: app.m as u32, d: dia as u32 },
-            kind: Kind::Expense,
-            category: flounder::model::Category::Other,
-            owner: if app.eu == 1 { Person::B } else { Person::A },
-            shared: false,
-            paid: false,
-            card: None,
-            connected: None,
-            imported: false,
-            recurring: false,
-        };
-        let id = app.data.upsert(entrada);
-        app.enviar(backend::Cmd::Entry(app.data.entry(id).expect("entrada acabou de entrar").clone()));
-    }
-    let dia_f = dia;
-    if app.demo {
-        let entrada = mock::Entrada { desc: desc_demo, centavos, membro: app.eu, shared: false, card: None, paid: false };
-        if let Some(d) = app.dados.fluxo.iter_mut().find(|d| d.dia == dia_f) {
-            d.entradas.push(entrada);
-        } else {
-            app.dados.fluxo.push(mock::DiaFluxo { dia: dia_f, entradas: vec![entrada] });
-            app.dados.fluxo.sort_by_key(|d| d.dia);
-        }
-    }
-    app.tab = Tab::Fluxo;
-    app.atualizar_mes();
-}
-
 /// Novo cartão (só demonstração: cartões reais vêm da Pluggy).
 fn salvar_cartao(app: &mut MobileApp) {
     let Some(Sheet::Cartao(sheet)) = app.sheet.as_ref().cloned() else { return };

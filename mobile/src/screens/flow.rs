@@ -1,4 +1,5 @@
-//! Tela Fluxo: resumo do caixa do mês e os lançamentos dia a dia (toque alterna pago).
+//! Tela Fluxo: resumo do caixa do mês e os lançamentos dia a dia (toque abre a edição;
+//! "Copiar do mês anterior" repete os lançamentos manuais do mês passado).
 
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Sense, Vec2};
 use egui_phosphor::regular as icon;
@@ -6,31 +7,46 @@ use flounder::widgets as w;
 
 use crate::app::MobileApp;
 use crate::mock::{DiaFluxo, MEMBROS};
+use crate::screens::lancamento;
 use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     // Dias sempre em ordem crescente (o FAB já ordena, mas por garantia).
     app.dados.fluxo.sort_by_key(|d| d.dia);
 
-    // Mês aberto sem nenhum lançamento.
+    // Demonstração: os fixtures do mock nascem com id 0 — numera as entradas (1, 2, 3…)
+    // para o toque abrir a edição da linha certa e o Excluir derrubar só a entrada tocada.
+    // Sessão real: os ids vêm do backend (`Data::upsert`) e ficam como estão.
+    if app.demo {
+        let mut proximo = 1u32;
+        for d in &mut app.dados.fluxo {
+            for e in &mut d.entradas {
+                e.id = proximo;
+                proximo += 1;
+            }
+        }
+    }
+
+    // Mês aberto sem nenhum lançamento: o botão de copiar continua à mão.
     if app.dados.fluxo.is_empty() {
         theme::vazio(ui, "🐟", "Nenhum lançamento neste mês.");
+        ui.add_space(12.0);
+        botao_copiar(ui, app);
         return;
     }
 
     resumo(ui, app);
 
-    // Toques acumulados no desenho e aplicados no fim (mock por &mut).
-    let mut alternar: Vec<(usize, usize)> = Vec::new();
-    dias(ui, app, &mut alternar);
-    for (i, j) in alternar {
-        let e = &mut app.dados.fluxo[i].entradas[j];
-        e.paid = !e.paid;
+    // Toques acumulados no desenho e aplicados no fim (a linha inteira abre a edição).
+    let mut editar: Vec<u32> = Vec::new();
+    dias(ui, app, &mut editar);
+    for id in editar {
+        lancamento::folha_editar(app, id);
     }
 }
 
-/// Cartão-resumo "Fluxo de caixa" do mês: entradas, saídas e saldo.
-fn resumo(ui: &mut egui::Ui, app: &MobileApp) {
+/// Cartão-resumo "Fluxo de caixa" do mês: entradas, saídas, saldo e o botão de copiar.
+fn resumo(ui: &mut egui::Ui, app: &mut MobileApp) {
     let c = theme::cores();
     let (entradas, saidas) = totais(&app.dados.fluxo);
     let saldo = entradas - saidas;
@@ -49,6 +65,8 @@ fn resumo(ui: &mut egui::Ui, app: &MobileApp) {
             coluna(&mut cols[1], "Saídas", saidas, c.red);
             coluna(&mut cols[2], "Saldo", saldo, c.blue);
         });
+        ui.add_space(12.0);
+        botao_copiar(ui, app);
     });
 }
 
@@ -78,8 +96,28 @@ fn totais(fluxo: &[DiaFluxo]) -> (i64, i64) {
     (ent, sai)
 }
 
-/// Um cartão por dia; guarda os índices das linhas tocadas.
-fn dias(ui: &mut egui::Ui, app: &MobileApp, alternar: &mut Vec<(usize, usize)>) {
+/// Pílula "Copiar do mês anterior": repete os lançamentos manuais do mês passado
+/// (como no desktop). Demonstração não grava nada: a pílula fica apagada.
+fn botao_copiar(ui: &mut egui::Ui, app: &mut MobileApp) {
+    let c = theme::cores();
+    let habilitado = !app.demo;
+    let resp = ui.add_sized(
+        [ui.available_width(), 38.0],
+        egui::Button::new(
+            egui::RichText::new(format!("{} Copiar do mês anterior", icon::COPY))
+                .font(w::semibold(12.5))
+                .color(if habilitado { c.blue } else { c.faint }),
+        )
+        .fill(if habilitado { c.blue_soft } else { c.line })
+        .corner_radius(255),
+    );
+    if habilitado && resp.clicked() {
+        app.copiar_mes_anterior();
+    }
+}
+
+/// Um cartão por dia; guarda os ids das linhas tocadas.
+fn dias(ui: &mut egui::Ui, app: &MobileApp, editar: &mut Vec<u32>) {
     for i in 0..app.dados.fluxo.len() {
         let dia = app.dados.fluxo[i].dia;
         let saldo_dia: i64 = app.dados.fluxo[i].entradas.iter().map(|e| e.centavos).sum();
@@ -98,7 +136,7 @@ fn dias(ui: &mut egui::Ui, app: &MobileApp, alternar: &mut Vec<(usize, usize)>) 
                 if j > 0 {
                     divisor(ui);
                 }
-                linha(ui, i, j, app, alternar);
+                linha(ui, i, j, app, editar);
             }
         });
     }
@@ -113,10 +151,11 @@ fn divisor(ui: &mut egui::Ui) {
     ui.add_space(8.0);
 }
 
-/// Uma entrada do fluxo; tocar na linha alterna pago (guardado em `alternar`).
-fn linha(ui: &mut egui::Ui, i: usize, j: usize, app: &MobileApp, alternar: &mut Vec<(usize, usize)>) {
+/// Uma entrada do fluxo; tocar na linha inteira abre a edição (guardado em `editar`).
+fn linha(ui: &mut egui::Ui, i: usize, j: usize, app: &MobileApp, editar: &mut Vec<u32>) {
     let c = theme::cores();
     let e = &app.dados.fluxo[i].entradas[j];
+    let id = e.id;
     let receita = e.centavos >= 0;
     let (glifo, cor_valor, suave) = if receita {
         (icon::ARROW_UP_RIGHT, c.green, c.green_soft)
@@ -165,15 +204,16 @@ fn linha(ui: &mut egui::Ui, i: usize, j: usize, app: &MobileApp, alternar: &mut 
         });
     });
 
-    // Linha inteira tocável (pintas o realce por cima, quase invisível).
+    // Linha inteira tocável (pintas o realce por cima, quase invisível). O id do toque
+    // vem da entrada (estável entre quadros, mesmo com o mês reordenado).
     let rect = conteudo.response.rect;
-    let resp = ui.interact(rect.expand2(Vec2::new(6.0, 4.0)), egui::Id::new(("fluxo-linha", i, j)), Sense::click());
+    let resp = ui.interact(rect.expand2(Vec2::new(6.0, 4.0)), egui::Id::new(("fluxo-linha", id)), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(10), Color32::from_rgba_unmultiplied(47, 108, 255, 16));
     }
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked() {
-        alternar.push((i, j));
+        editar.push(id);
     }
 }
 
