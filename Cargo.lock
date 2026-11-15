@@ -1134,16 +1134,25 @@ dependencies = [
 
 [[package]]
 name = "flounder"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "eframe",
  "egui",
  "egui-phosphor",
  "egui_kittest",
+ "flounder-core",
  "image",
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "flounder-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

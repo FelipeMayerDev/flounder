@@ -1,6 +1,6 @@
 [package]
 name = "flounder"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -8,6 +8,7 @@ publish = false
 resolver = "2"
 
 [dependencies]
+flounder-core = { path = "./core" }
 eframe = { version = "=0.36.2", default-features = false, features = ["wgpu", "wayland", "x11", "persistence"] }
 egui = "=0.36.2"
 egui-phosphor = "=0.14.0"
