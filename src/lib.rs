@@ -1,12 +1,11 @@
 pub mod app;
-pub mod model;
 mod dashboard;
 pub mod screens;
 pub mod widgets;
-#[path = "../shared/cards.rs"]
-pub mod connected;
-#[path = "../shared/api.rs"]
-pub mod api;
 pub mod backend;
 pub mod assistant;
 pub mod update;
+
+// Estado, cálculos e contrato JSON vivem no núcleo compartilhado; os módulos são
+// reexportados para os caminhos antigos (`crate::model`, `flounder::api`…) seguirem iguais.
+pub use flounder_core::{api, connected, model};

@@ -83,6 +83,7 @@ fn capturas() {
     app.agent.chat = vec![flounder::api::ChatMsg {
         role: "assistant".into(),
         content: "Oi! Sou o Flounder 🐠 Já li os lançamentos de vocês. Me pergunte qualquer coisa — do saldo do mês àquela conta que sempre esquece.".into(),
+        ops: Vec::new(),
     }];
     shot(app, "consultor", &dir);
     // Folha de novo cartão, preenchida (só existe no modo demonstração).

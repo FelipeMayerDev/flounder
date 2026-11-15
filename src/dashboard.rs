@@ -6,9 +6,11 @@ use crate::widgets as w;
 use egui::{pos2, vec2, Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Stroke, Ui, WidgetInfo, WidgetType};
 use egui_phosphor::regular as icon;
 
-const TITLES: [&str; 7] = [
+const TITLES: [&str; 9] = [
     "Saldo previsto", "Contas a pagar", "Calendário de vencimentos",
     "Evolução do saldo previsto", "Divisão da casa", "Cartões", "Moradia",
+    // Condicionais: só entram no painel quando há dados (ver `show`).
+    "Orçamento do mês", "Mudanças de preço",
 ];
 const GAP: f32 = 16.0;
 const PAD: f32 = 16.0;
@@ -18,18 +20,18 @@ const MAX_HEIGHT: f32 = ROW * 40.0 - GAP;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DashboardLayout {
-    pub order: [usize; 7],
+    pub order: [usize; 9],
     /// Zero mantém a largura responsiva até o primeiro ajuste horizontal.
-    pub spans: [u8; 7],
-    pub heights: [f32; 7],
+    pub spans: [u8; 9],
+    pub heights: [f32; 9],
 }
 
 impl Default for DashboardLayout {
     fn default() -> Self {
         Self {
-            order: [0, 1, 2, 3, 4, 5, 6],
-            spans: [0; 7],
-            heights: [0.0; 7],
+            order: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+            spans: [0; 9],
+            heights: [0.0; 9],
         }
     }
 }
@@ -54,14 +56,16 @@ impl DashboardLayout {
     pub fn decode(value: &str) -> Option<Self> {
         let mut layout = Self::default();
         let entries: Vec<_> = value.split(',').collect();
-        if entries.len() != TITLES.len() { return None; }
-        let mut seen = [false; 7];
+        // Layout salvo antes dos cards condicionais: 7 entradas, sempre os cards 0–6.
+        let legacy = entries.len() == 7;
+        if !legacy && entries.len() != TITLES.len() { return None; }
+        let mut seen = [false; 9];
         for (index, entry) in entries.iter().enumerate() {
             let mut fields = entry.split(':');
             let card: usize = fields.next()?.parse().ok()?;
             let span: u8 = fields.next()?.parse().ok()?;
             let height: f32 = fields.next()?.parse().ok()?;
-            if card >= TITLES.len() || seen[card] || fields.next().is_some()
+            if card >= if legacy { 7 } else { TITLES.len() } || seen[card] || fields.next().is_some()
                 || span > 12 || !height.is_finite() || height < 0.0 {
                 return None;
             }
@@ -69,8 +73,8 @@ impl DashboardLayout {
             layout.order[index] = card;
             layout.spans[card] = span;
             // As alturas automáticas antigas deixavam espaço vazio dentro dos cards.
-            let old_default = [384.0, 384.0, 504.0, 504.0, 424.0, 424.0, 424.0][card];
-            layout.heights[card] = if height == 0.0 || height == old_default { 0.0 } else {
+            let old_default = [384.0, 384.0, 504.0, 504.0, 424.0, 424.0, 424.0].get(card).copied();
+            layout.heights[card] = if height == 0.0 || Some(height) == old_default { 0.0 } else {
                 (((height + GAP) / ROW).round() * ROW - GAP)
                     .clamp(((Self::minimum(card).y + GAP) / ROW).ceil() * ROW - GAP, MAX_HEIGHT)
             };
@@ -102,7 +106,7 @@ impl DashboardLayout {
         let mut used = 0;
         for &card in &self.order {
             let minimum = ((Self::minimum(card).x.min(width) + GAP) / column).ceil().min(12.0) as u8;
-            let span = if self.spans[card] == 0 { [8, 4, 7, 5, 4, 4, 4][card] } else { self.spans[card] };
+            let span = if self.spans[card] == 0 { [8, 4, 7, 5, 4, 4, 4, 4, 4][card] } else { self.spans[card] };
             let span = span.max(minimum);
             if used + span > 12 && !row.is_empty() {
                 rows.push(row);
@@ -134,7 +138,13 @@ pub fn show(app: &mut App, s: &Summary, ui: &mut Ui) {
     let colors = w::palette(ui.ctx());
     let mut moved = None;
     let dragged = egui::DragAndDrop::payload::<usize>(ui.ctx()).map(|c| *c);
-    let resizing = (0..7).any(|card| ui.ctx().is_being_dragged(egui::Id::new(("dashboard-resize", card))));
+    let resizing = (0..TITLES.len()).any(|card| ui.ctx().is_being_dragged(egui::Id::new(("dashboard-resize", card))));
+    // Cards condicionais: fora do ar quando não há o que mostrar (o layout segue o mesmo).
+    let visible = [
+        true, true, true, true, true, true, true,
+        !app.budgets.is_empty(),
+        !app.data.price_alerts(app.month, 0.20).is_empty(),
+    ];
     if dragged.is_some() || resizing {
         let clip = ui.clip_rect();
         for column in 0..=12 {
@@ -149,6 +159,9 @@ pub fn show(app: &mut App, s: &Summary, ui: &mut Ui) {
     }
     let mut ghost = None;
     for row in app.dashboard_layout.rows(width) {
+        let mut row = row;
+        row.retain(|(card, _)| visible[*card]);
+        if row.is_empty() { continue; }
         let mut x = left;
         let mut bottom = top;
         for (card, card_width) in row {
@@ -181,7 +194,7 @@ pub fn show(app: &mut App, s: &Summary, ui: &mut Ui) {
                 });
                 if direction != 0 {
                     let index = app.dashboard_layout.order.iter().position(|&c| c == card).unwrap();
-                    let target = (index as isize + direction).clamp(0, 6) as usize;
+                    let target = (index as isize + direction).clamp(0, (TITLES.len() - 1) as isize) as usize;
                     moved = Some((card, app.dashboard_layout.order[target]));
                 }
             }
@@ -198,7 +211,9 @@ pub fn show(app: &mut App, s: &Summary, ui: &mut Ui) {
                 }
                 4 => split_block(app, s, &mut child, true),
                 5 => cards_block(app, s, &mut child, true),
-                _ => housing_block(app, s, &mut child, true),
+                6 => housing_block(app, s, &mut child, true),
+                7 => budget_card(app, s, &mut child, true),
+                _ => price_card(app, &mut child, true),
             }
             let natural = child.min_rect().bottom() + PAD_Y - position.y;
             let height = ((desired_height.max(natural) + GAP) / ROW).ceil() * ROW - GAP;
@@ -438,6 +453,59 @@ fn bills_card(app: &mut App, s: &Summary, ui: &mut Ui, limit: usize, art: bool) 
     }
 }
 
+/// "Orçamento do mês": consumo por categoria contra o teto definido em Ajustes, do mais
+/// estourado ao mais folgado.
+fn budget_card(app: &App, s: &Summary, ui: &mut Ui, art: bool) {
+    let colors = w::palette(ui.ctx());
+    w::title_with_art(ui, "Orçamento do mês", art.then_some(w::Art::Bars));
+    for (key, spent, budget) in crate::model::budget_usage(&s.by_category, &app.budgets) {
+        let frac = spent as f32 / budget.max(1) as f32;
+        let col = if frac >= 1.0 { colors.red } else if frac >= 0.8 { colors.amber } else { colors.blue };
+        w::group(ui, |ui| {
+            w::kv_dot(ui, Some(col), category_label(&key), spent, colors.text);
+            w::progress(ui, frac, col, 6.0, None);
+            w::caption(ui, format!("de {} · {}", money(budget), w::pct(frac * 100.0)));
+        });
+        ui.add_space(4.0);
+    }
+}
+
+/// "Mudanças de preço": contas fixas cuja ocorrência mais recente foge da média histórica.
+fn price_card(app: &App, ui: &mut Ui, art: bool) {
+    let colors = w::palette(ui.ctx());
+    w::title_with_art(ui, "Mudanças de preço", art.then_some(w::Art::ChartUp));
+    for (desc, recent, average) in app.data.price_alerts(app.month, 0.20) {
+        let up = recent >= average;
+        let pct = (recent - average).unsigned_abs() as f64 / average.max(1) as f64 * 100.0;
+        w::group(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                w::text(ui, format!("{desc}: {} (média {})", money(recent), money(average)), w::regular(14.0), colors.text);
+                w::text(ui, format!("{}{}", if up { "+" } else { "−" }, w::pct(pct as f32)), w::semibold(13.0), if up { colors.red } else { colors.green });
+            });
+        });
+        ui.add_space(4.0);
+    }
+}
+
+/// Nome amigável da categoria pelo chave do banco ("groceries" → "Mercado").
+fn category_label(key: &str) -> &'static str {
+    Category::ALL.iter().find(|c| c.key() == key).map_or("Outros", |c| c.label())
+}
+
+/// Aviso de fechamento iminente do cartão (0–3 dias): texto para o chip âmbar.
+pub(crate) fn closing_alert(card: &crate::connected::ConnectedCard) -> Option<String> {
+    let day = card.closing_day.filter(|d| (1..=31).contains(d))?;
+    let days = crate::model::days_to_closing(day, today());
+    (days <= 3).then(|| format!(
+        "Fecha {} — compras de hoje já vão para a próxima fatura.",
+        match days {
+            0 => "hoje".into(),
+            1 => "amanhã".into(),
+            n => format!("em {n} dias"),
+        }
+    ))
+}
+
 fn mini(ui: &mut Ui, ic: &str, label: &str, v: Cents, color: Color32) {
     let colors = w::palette(ui.ctx());
     ui.spacing_mut().item_spacing.y = 4.0;
@@ -605,6 +673,7 @@ pub(crate) fn card_face(ui: &mut Ui, face: CardFace) -> egui::Response {
 }
 
 fn cards_block(app: &mut App, s: &Summary, ui: &mut Ui, art: bool) {
+    let colors = w::palette(ui.ctx());
     w::title_with_art(ui, "Cartões", art.then_some(w::Art::Card));
     if let Some(cards) = &app.connected_cards {
         let mut opened = None;
@@ -614,6 +683,10 @@ fn cards_block(app: &mut App, s: &Summary, ui: &mut Ui, art: bool) {
         for card in &cards {
             let face = connected_face(card, app.month);
             if ui.push_id(&card.id, |ui| card_face(ui, face)).inner.clicked() { opened = Some(card.id.clone()); }
+            if let Some(alert) = closing_alert(card) {
+                let chip = w::chip(ui, &format!("{} {}", icon::CLOCK, alert), colors.amber, colors.amber_soft);
+                chip.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &alert));
+            }
             ui.add_space(8.0);
         }
         if !cards.is_empty() { w::caption(ui, "Clique no cartão para consultar limites e faturas."); }
@@ -864,21 +937,32 @@ mod layout_tests {
     }
 
     #[test]
+    fn legacy_layout_gains_the_conditional_cards_without_losing_custom_sizes() {
+        let layout = DashboardLayout::decode("2:7:504,0:8:0,1:4:0,3:5:500,4:4:0,5:4:0,6:4:0").unwrap();
+        assert_eq!(layout.order, [2, 0, 1, 3, 4, 5, 6, 7, 8]);
+        // Altura é por card: o 504 antigo do card 2 vira automático; o 500 do card 3 (custom) se mantém.
+        assert_eq!(layout.heights, [0.0, 0.0, 0.0, 504.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        // 9 entradas de um layout novo: os cards 7 e 8 existem.
+        let nine = DashboardLayout::decode(&DashboardLayout::default().encode()).unwrap();
+        assert_eq!(nine.order, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
     fn three_cards_fit_a_row_at_supported_widths() {
         let mut layout = DashboardLayout::default();
-        layout.spans = [4; 7];
-        layout.order = [0, 2, 3, 1, 4, 6, 5];
+        layout.spans = [4; 9];
+        layout.order = [0, 2, 3, 1, 4, 6, 5, 7, 8];
         let rows = layout.rows(968.0);
         assert_eq!(rows[0].iter().map(|(card, _)| *card).collect::<Vec<_>>(), vec![0, 2, 3]);
-        layout.order = [1, 4, 6, 0, 2, 3, 5];
+        layout.order = [1, 4, 6, 0, 2, 3, 5, 7, 8];
         assert_eq!(layout.rows(728.0)[0].len(), 3);
     }
 
     #[test]
     fn old_default_heights_become_compact_without_resetting_custom_sizes() {
         let layout = DashboardLayout::decode("0:8:384,1:4:384,2:7:504,3:5:504,4:4:424,5:4:624,6:4:424").unwrap();
-        assert_eq!(layout.heights, [0.0, 0.0, 0.0, 0.0, 0.0, 624.0, 0.0]);
-        assert_eq!(layout.spans, [8, 4, 7, 5, 4, 4, 4]);
+        assert_eq!(layout.heights, [0.0, 0.0, 0.0, 0.0, 0.0, 624.0, 0.0, 0.0, 0.0]);
+        assert_eq!(layout.spans, [8, 4, 7, 5, 4, 4, 4, 0, 0]);
     }
 
     #[test]
@@ -889,7 +973,7 @@ mod layout_tests {
         layout.resize(0, vec2(start_span, 400.0), vec2(-125.0, 0.0), 736.0);
         assert!(layout.rows(736.0)[0][0].1 < before);
         for width in [736.0, 1160.0] {
-            for card in 0..7 {
+            for card in 0..9 {
                 layout.resize(card, vec2(8.0, 500.0), vec2(-10_000.0, -10_000.0), width);
                 let minimum = DashboardLayout::minimum(card);
                 assert!(layout.heights[card] >= minimum.y);

@@ -218,9 +218,8 @@ fn secao_acertos(ui: &mut Ui, app: &mut MobileApp) {
                     )
                     .clicked()
                 {
-                    // Mesmo parse do lançamento: "1.234,56" → 123456 centavos.
-                    let bruto = est.valor.trim().replace('.', "").replace(',', ".");
-                    let centavos = (bruto.parse::<f64>().unwrap_or(0.0) * 100.0).round() as i64;
+                    // Mesmo parser inteiro do desktop: "1.234,56" → 123456 centavos.
+                    let centavos = flounder::model::parse_money(&est.valor).unwrap_or(0);
                     if centavos > 0 {
                         acao_salvar = Some((centavos, est.de));
                         est.aberto = false;

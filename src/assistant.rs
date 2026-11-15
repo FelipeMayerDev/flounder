@@ -57,10 +57,24 @@ impl Agent {
         }
     }
 
-    pub fn on_chat(&mut self, result: Result<String, String>) {
+    pub fn on_chat(&mut self, result: Result<crate::api::ChatReply, String>) {
         self.waiting_chat = false;
         match result {
-            Ok(content) => self.chat.push(crate::api::ChatMsg { role: "assistant".into(), content }),
+            Ok(reply) => self.chat.push(crate::api::ChatMsg {
+                role: "assistant".into(),
+                content: reply.content,
+                ops: reply.ops,
+            }),
+            Err(error) => self.chat_error = Some(error),
+        }
+    }
+
+    /// Histórico persistido chegou do backend: enche a conversa só se a local está vazia
+    /// (não pisca no que o usuário já mandou nesta sessão).
+    pub fn on_history(&mut self, history: Result<crate::api::ChatHistory, String>) {
+        match history {
+            Ok(h) if self.chat.is_empty() => self.chat = h.messages,
+            Ok(_) => {}
             Err(error) => self.chat_error = Some(error),
         }
     }
@@ -71,7 +85,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     bubble(app, &ctx);
     if app.agent.open {
+        // Janela aberta com conversa vazia: pede o histórico uma vez por abertura.
+        if app.agent.chat.is_empty() && !app.history_requested {
+            app.history_requested = true;
+            app.ask(Cmd::History);
+        }
         window(app, &ctx);
+    } else {
+        // Fechou: a próxima abertura com conversa vazia pede o histórico de novo.
+        app.history_requested = false;
     }
 }
 
@@ -245,7 +267,7 @@ fn window(app: &mut App, ctx: &egui::Context) {
     }
     if analyze {
         app.agent.waiting_analysis = true;
-        app.send(Cmd::Analyze);
+        app.ask(Cmd::Analyze);
     }
     if send {
         send_chat(app);
@@ -296,6 +318,9 @@ fn chat(app: &mut App, ui: &mut Ui, send: &mut bool) {
         for msg in &app.agent.chat {
             let mine = msg.role == "user";
             bubble_line(ui, &colors, mine, &msg.content);
+            if !msg.ops.is_empty() {
+                ops_line(ui, &colors, &msg.ops);
+            }
             ui.add_space(w::GROUP_GAP);
         }
         if app.agent.waiting_chat {
@@ -314,8 +339,13 @@ fn chat(app: &mut App, ui: &mut Ui, send: &mut bool) {
             .inner_margin(egui::Margin::symmetric(10, 7))
             .stroke(Stroke::new(1.0, colors.line))
             .show(ui, |ui| {
-                ui.add(w::text_input(&mut app.agent.input, "Pergunte qualquer coisa…").frame(egui::Frame::new()).desired_width(row - 88.0))
+                ui.add(w::text_input(&mut app.agent.input, "Pergunte qualquer coisa…").frame(egui::Frame::new()).desired_width(row - 124.0))
             }).inner;
+        if w::icon_button(ui, icon::ERASER, "Limpar conversa").clicked() {
+            app.agent.chat.clear();
+            app.agent.chat_error = None;
+            app.send(Cmd::ClearHistory);
+        }
         let send_btn = egui::Button::new(egui::RichText::new(icon::PAPER_PLANE_RIGHT).font(w::semibold(15.0)).color(colors.bg))
             .fill(colors.blue).corner_radius(CornerRadius::same(10)).min_size(vec2(36.0, 36.0));
         let pressed = ui.add(send_btn).clicked() || input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -349,6 +379,18 @@ fn bubble_line(ui: &mut Ui, colors: &w::Palette, mine: bool, text: &str) {
     });
 }
 
+/// Os selos das ações que o assistente executou no app, sob a bolha da resposta, alinhados
+/// com o texto dela (o mesmo recuo do avatar).
+fn ops_line(ui: &mut Ui, colors: &w::Palette, ops: &[crate::api::Op]) {
+    ui.with_layout(Layout::left_to_right(Align::Min).with_main_wrap(true), |ui| {
+        ui.add_space(28.0);
+        for op in ops {
+            w::chip(ui, &format!("{} {}", icon::CHECK_CIRCLE, op.label), colors.green, colors.green_soft);
+            ui.add_space(4.0);
+        }
+    });
+}
+
 /// Três pontinhos animados enquanto o GLM pensa.
 fn thinking(ui: &mut Ui, colors: &w::Palette) {
     let ctx = ui.ctx().clone();
@@ -370,11 +412,11 @@ fn thinking(ui: &mut Ui, colors: &w::Palette) {
 
 fn send_chat(app: &mut App) {
     let question = app.agent.input.trim().to_string();
-    app.agent.chat.push(crate::api::ChatMsg { role: "user".into(), content: question });
+    app.agent.chat.push(crate::api::ChatMsg { role: "user".into(), content: question, ops: Vec::new() });
     if app.agent.chat.len() > MAX_HISTORY {
         app.agent.chat.drain(..app.agent.chat.len() - MAX_HISTORY);
     }
-    app.send(Cmd::Chat(app.agent.chat.clone()));
+    app.ask(Cmd::Chat(app.agent.chat.clone()));
     app.agent.input.clear();
     app.agent.waiting_chat = true;
     app.agent.chat_error = None;

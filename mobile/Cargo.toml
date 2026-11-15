@@ -21,6 +21,8 @@ eframe = { version = "=0.36.2", default-features = false, features = ["wgpu", "w
 egui = "=0.36.2"
 egui-phosphor = "=0.14.0"
 flounder = { path = ".." }
+# Relatório da rotina do mês (`Msg::Routine`): JSON tolerante, chave por chave.
+serde_json = "=1.0.154"
 
 # Desktop: accesskit (no Android, native-activity não combina com accesskit no eframe 0.36).
 [target.'cfg(not(target_os = "android"))'.dependencies]

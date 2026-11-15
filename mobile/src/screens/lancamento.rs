@@ -301,8 +301,9 @@ fn salvar(app: &mut MobileApp) {
     }) else {
         return;
     };
-    let bruto = folha.valor.trim().replace('.', "").replace(',', ".");
-    let centavos = (bruto.parse::<f64>().unwrap_or(0.0) * 100.0).round().abs() as i64;
+    // Mesmo parser inteiro do desktop: "1.234,56", "1234.56", "R$ 50". Valor inválido
+    // vira zero e cai na validação de baixo, como antes.
+    let centavos = flounder::model::parse_money(&folha.valor).unwrap_or(0);
     let dia: u32 = folha.dia.trim().parse().unwrap_or(0);
     if folha.desc.trim().is_empty() || centavos == 0 || dia == 0 || dia > 31 {
         if let Some(crate::app::Sheet::Lancamento(f)) = app.sheet.as_mut() {

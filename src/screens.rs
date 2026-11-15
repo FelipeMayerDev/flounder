@@ -76,8 +76,7 @@ pub fn cash_flow(app: &mut App, ui: &mut Ui) {
     let all: Vec<Entry> = app.data.in_month(month).filter(|e| couple || e.owner == me).cloned().collect();
     let mut rows: Vec<Entry> = all.iter().filter(|e| app.flow.keeps(e)).cloned().collect();
     rows.sort_by_key(|e| Reverse(e.date));
-    let sum = |k: Kind| rows.iter().filter(|e| e.kind == k).map(|e| e.amount).sum::<Cents>();
-    let (income, out) = (sum(Kind::Income), sum(Kind::Expense));
+    let (income, out) = crate::model::cash_flow(rows.iter());
     let mut breakdown = Summary { expenses: out, ..Default::default() };
     for e in rows.iter().filter(|e| e.kind == Kind::Expense) {
         match breakdown.by_category.iter_mut().find(|(c, _)| *c == e.category) {
@@ -493,27 +492,52 @@ fn card_section(app: &mut App, card: &ConnectedCard, ui: &mut Ui) {
     };
     let mut purchases = |ui: &mut Ui| {
         w::text(ui, format!("Compras de {} {}", month.name().to_lowercase(), month.y), w::semibold(14.0), colors.text);
-        let mut items: Vec<&Entry> = app.data.in_month(month).filter(|e| e.connected.as_deref() == Some(card.id.as_str())).collect();
+        if let Some(alert) = crate::dashboard::closing_alert(card) {
+            let chip = w::chip(ui, &format!("{} {}", icon::CLOCK, alert), colors.amber, colors.amber_soft);
+            chip.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &alert));
+        }
+        let mut items: Vec<&Entry> = app.data.connected_purchases(month, &card.id, card.closing_day, card.due_day).collect();
         items.sort_by_key(|e| Reverse(e.date));
         let total: Cents = items.iter().map(|e| if e.kind == Kind::Income { -e.amount } else { e.amount }).sum();
         let prefix = format!("{:04}-{:02}-", month.y, month.m);
         let bill = card.bills.iter().find(|b| b.due.starts_with(&prefix));
-        // ponytail: compras do mês civil, sem data de fechamento; a soma pode diferir da fatura.
+        // ponytail: a soma pode diferir da fatura (moeda estrangeira; Pluggy manda a dela).
         w::caption(ui, match bill {
             Some(b) => format!("Total {} · fatura que vence em {}: {}", money(total), month.name().to_lowercase(), connected_money(b.total, &b.currency)),
             None => format!("Total {} · nenhuma fatura vence em {}", money(total), month.name().to_lowercase()),
         });
         if items.is_empty() {
-            return w::empty_note(ui, "Nenhuma compra neste mês.");
-        }
-        w::list(ui, |ui| {
-            for e in items {
-                // O dia na linha: compras repetidas (mercado, lanchonete…) ficam reconhecíveis.
-                if entry_row(ui, e, Some(&format!("dia {}", e.date.d))).clicked() {
-                    open = Some(e.id);
+            w::empty_note(ui, "Nenhuma compra neste mês.");
+        } else {
+            w::list(ui, |ui| {
+                for e in items {
+                    // O dia na linha: compras repetidas (mercado, lanchonete…) ficam reconhecíveis.
+                    if entry_row(ui, e, Some(&format!("dia {}", e.date.d))).clicked() {
+                        open = Some(e.id);
+                    }
                 }
+            });
+        }
+        // Fechamento informado: o que veio nele ou depois ainda está na fatura em formação.
+        if card.closing_day.is_some() {
+            ui.add_space(w::GROUP_GAP);
+            let mut next: Vec<&Entry> = app.data.next_invoice_purchases(month, &card.id, card.closing_day).collect();
+            next.sort_by_key(|e| Reverse(e.date));
+            if next.is_empty() {
+                w::caption(ui, "Depois do fechamento — nada ainda.");
+            } else {
+                w::text(ui, "Depois do fechamento — próxima fatura", w::semibold(14.0), colors.text);
+                let total: Cents = next.iter().map(|e| if e.kind == Kind::Income { -e.amount } else { e.amount }).sum();
+                w::caption(ui, format!("Total {}", money(total)));
+                w::list(ui, |ui| {
+                    for e in next {
+                        if entry_row(ui, e, Some(&format!("dia {}", e.date.d))).clicked() {
+                            open = Some(e.id);
+                        }
+                    }
+                });
             }
-        });
+        }
     };
     if ui.available_width() >= 760.0 {
         ui.columns(2, |c| {
@@ -567,6 +591,8 @@ pub struct Extra {
     /// Nomes em edição em Ajustes; `None` mostra os salvos.
     pub names: Option<[String; 2]>,
     pub names_tried: bool,
+    /// Rascunho dos orçamentos em Ajustes, na ordem de `BUDGET_CATS`.
+    pub budget_drafts: Option<Vec<String>>,
 }
 
 impl Extra {
@@ -1161,6 +1187,9 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
     if refresh {
         app.refresh();
     }
+    budgets_settings(app, ui);
+    assistant_settings(app, ui);
+    routine_settings(app, ui);
     access_card(app, ui);
     update_card(app, ui);
 }
@@ -1298,6 +1327,203 @@ fn shared_settings(app: &mut App, ui: &mut Ui) {
     if split_off != app.data.shared_split_off {
         app.data.shared_split_off = split_off;
         app.send(Cmd::Settings(crate::api::Settings { shared_split_off: split_off }));
+    }
+}
+
+// ───────────────────────── Orçamentos, ações do assistente e rotina do mês ─────────────────────────
+
+/// Categorias com orçamento editável em Ajustes (todas as despesas, na ordem fixa do rascunho).
+const BUDGET_CATS: [Category; 13] = [
+    Category::Housing, Category::Utilities, Category::Groceries, Category::Transport,
+    Category::Health, Category::Leisure, Category::Reserve, Category::Family,
+    Category::Shopping, Category::Services, Category::Education, Category::Pets, Category::Other,
+];
+
+/// Orçamentos mensais por categoria: campo de valor por linha com "Salvar" (vazio/0 remove,
+/// via `PUT /api/budgets`). Ao lado, o gasto do mês e o consumo quando há orçamento.
+fn budgets_settings(app: &mut App, ui: &mut Ui) {
+    let colors = w::palette(ui.ctx());
+    let s = app.data.summary(app.month, app.mode);
+    let mut save = None;
+    w::card(ui, NORMAL, |ui| {
+        w::title(ui, "Orçamentos");
+        w::caption(ui, "Teto mensal de gasto por categoria. Deixe vazio e salve para remover.");
+        ui.add_space(w::GROUP_GAP);
+        let drafts = app.extra.budget_drafts.get_or_insert_with(|| {
+            BUDGET_CATS.iter().map(|c| {
+                app.budgets.iter().find(|b| b.category == c.key()).map_or(String::new(), |b| input_money(b.monthly_cents))
+            }).collect()
+        });
+        for (i, cat) in BUDGET_CATS.iter().enumerate() {
+            let saved = app.budgets.iter().find(|b| b.category == cat.key()).map_or(0, |b| b.monthly_cents);
+            let parsed = if drafts[i].trim().is_empty() { Some(0) } else { parse_money(&drafts[i]) };
+            let spent = s.by_category.iter().find(|(c, _)| c == cat).map_or(0, |(_, v)| *v);
+            ui.push_id(cat.key(), |ui| {
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
+                    ui.allocate_ui(vec2(120.0, 20.0), |ui| { w::text(ui, cat.label(), w::regular(14.0), colors.text); });
+                    ui.allocate_ui(vec2(150.0, 34.0), |ui| { w::money_input(ui, &mut drafts[i]); });
+                    if ui.add_enabled(parsed.is_some_and(|v| v != saved), egui::Button::new("Salvar").min_size(vec2(0.0, 32.0))).clicked()
+                        && let Some(cents) = parsed {
+                        save = Some((cat.key(), cents, i));
+                    }
+                    if saved > 0 && spent > 0 {
+                        let frac = spent as f32 / saved as f32;
+                        let col = if frac >= 1.0 { colors.red } else if frac >= 0.8 { colors.amber } else { colors.muted };
+                        w::text(ui, format!("{} · {}", money(spent), w::pct(frac * 100.0)), w::regular(12.0), col);
+                    }
+                });
+                let y = ui.cursor().top();
+                ui.painter().line_segment([pos2(ui.min_rect().left(), y), pos2(ui.max_rect().right(), y)], Stroke::new(1.0, colors.line));
+            });
+        }
+    });
+    if let Some((key, cents, i)) = save {
+        // Otimista: o card do painel e as linhas já mostram o valor novo; o backend confirma
+        // (ou recarrega os dados com o aviso de falha, como nas outras gravações).
+        app.budgets.retain(|b| b.category != key);
+        if cents > 0 {
+            app.budgets.push(crate::api::Budget { category: key.to_owned(), monthly_cents: cents });
+        }
+        if let Some(drafts) = app.extra.budget_drafts.as_mut() {
+            drafts[i] = if cents > 0 { input_money(cents) } else { String::new() };
+        }
+        app.send(Cmd::Budget(crate::api::Budget { category: key.to_owned(), monthly_cents: cents }));
+    }
+}
+
+/// Ações do assistente (auditoria): busca uma vez por sessão quando a seção aparece,
+/// com botão para buscar de novo.
+fn assistant_settings(app: &mut App, ui: &mut Ui) {
+    let colors = w::palette(ui.ctx());
+    if !app.actions_requested {
+        app.actions_requested = true;
+        app.ask(Cmd::AssistantActions);
+    }
+    let mut refresh = false;
+    w::card(ui, NORMAL, |ui| {
+        w::title(ui, "Ações do assistente");
+        w::caption(ui, "Auditoria do que o Flounder fez no app por conta própria durante a conversa.");
+        ui.add_space(w::GROUP_GAP);
+        match (&app.assistant_actions, &app.actions_error) {
+            (_, Some(error)) => {
+                w::text(ui, error.as_str(), w::regular(13.0), colors.red);
+            }
+            (None, _) => {
+                w::caption(ui, format!("{} Buscando as ações do assistente…", icon::HOURGLASS));
+            }
+            (Some(list), None) if list.is_empty() => {
+                w::empty_note(ui, "O assistente ainda não agiu.");
+            }
+            (Some(list), None) => {
+                w::list(ui, |ui| {
+                    for rec in list.iter().take(20) {
+                        ui.horizontal_wrapped(|ui| {
+                            w::caption(ui, local_time(&rec.at).map_or(String::new(), |(d, hm)| format!("{} {}", d.short(), hm)));
+                            w::text(ui, &rec.label, w::regular(13.0), colors.text);
+                            w::caption(ui, format!("· {}", rec.tool));
+                        });
+                        ui.add_space(2.0);
+                    }
+                });
+                if list.len() > 20 {
+                    w::caption(ui, format!("+ {} ações anteriores", list.len() - 20));
+                }
+            }
+        }
+        ui.add_space(w::GROUP_GAP);
+        refresh = ui.add(egui::Button::new(format!("{} Atualizar", icon::ARROWS_CLOCKWISE)).min_size(vec2(0.0, 32.0))).clicked();
+    });
+    if refresh {
+        app.actions_error = None;
+        app.ask(Cmd::AssistantActions);
+    }
+}
+
+/// Rotina do mês: "Fechar o mês" roda `POST /api/routine/month` e o relatório aparece aqui.
+fn routine_settings(app: &mut App, ui: &mut Ui) {
+    let colors = w::palette(ui.ctx());
+    let names = app.data.names.clone();
+    let mut fechar = false;
+    w::card(ui, NORMAL, |ui| {
+        w::title(ui, "Rotina do mês");
+        w::caption(ui, "Copia as contas fixas para o mês que vem, confere as faturas e sugere o acerto entre vocês.");
+        ui.add_space(w::GROUP_GAP);
+        match &app.routine {
+            None if app.routine_waiting => {
+                w::caption(ui, format!("{} Gerando o relatório do mês…", icon::HOURGLASS));
+            }
+            None => {}
+            Some(Ok(report)) => {
+                routine_report(ui, &colors, &names, report);
+            }
+            Some(Err(error)) => {
+                w::text(ui, error.as_str(), w::regular(13.0), colors.red);
+            }
+        }
+        ui.add_space(w::GROUP_GAP);
+        let btn = egui::Button::new(egui::RichText::new(format!("{} Fechar o mês", icon::CHECK_CIRCLE)).font(w::semibold(14.0)).color(colors.bg))
+            .fill(colors.blue).min_size(vec2(0.0, 36.0));
+        fechar = ui.add_enabled(!app.routine_waiting, btn).clicked();
+    });
+    if fechar {
+        app.run_routine(String::new());
+    }
+}
+
+/// Relatório da rotina, navegando com tolerância (chave pode faltar ou vir de tipo).
+fn routine_report(ui: &mut Ui, colors: &w::Palette, names: &[String; 2], report: &serde_json::Value) {
+    if let Some(list) = report["copiados"].as_array().filter(|l| !l.is_empty()) {
+        let n = list.len();
+        w::text(ui, format!("{} {} lançamento{} copiado{} para o mês que vem", icon::COPY, n, if n == 1 { "" } else { "s" }, if n == 1 { "" } else { "s" }), w::semibold(14.0), colors.text);
+        for e in list.iter().take(6) {
+            w::caption(ui, e["descricao"].as_str().unwrap_or("(sem descrição)"));
+        }
+        if n > 6 {
+            w::caption(ui, format!("+ {} outros", n - 6));
+        }
+        ui.add_space(w::GROUP_GAP);
+    }
+    if let Some(list) = report["faturas"].as_array().filter(|l| !l.is_empty()) {
+        w::text(ui, "Faturas do mês", w::semibold(14.0), colors.text);
+        for f in list {
+            let label = f["label"].as_str().unwrap_or("Fatura");
+            let due = f["due"].as_str().and_then(Date::iso).map(|d| format!("vence {}", d.short()));
+            let paid = f["paid"].as_bool().unwrap_or(false);
+            let total = f["total_cents"].as_i64().unwrap_or(0);
+            ui.horizontal_wrapped(|ui| {
+                w::text(ui, due.map_or_else(|| label.to_owned(), |due| format!("{label} · {due}")), w::regular(13.0), colors.text);
+                w::text(ui, if paid { "paga" } else { "aberta" }, w::semibold(12.0), if paid { colors.green } else { colors.amber });
+                w::text(ui, money(total), w::semibold(13.0), colors.text);
+            });
+        }
+        ui.add_space(w::GROUP_GAP);
+    }
+    if let Some(valor) = report["acerto_sugerido"]["valor_cents"].as_i64()
+        && let Some(de) = report["acerto_sugerido"]["de"].as_u64() {
+        let de = de.min(1) as usize;
+        w::text(ui, format!("{} Acerto sugerido: {} de {} para {}", icon::HAND_COINS, money(valor), names[de], names[1 - de]), w::semibold(14.0), colors.text);
+        ui.add_space(w::GROUP_GAP);
+    }
+    if let Some(list) = report["alertas_preco"].as_array().filter(|l| !l.is_empty()) {
+        w::text(ui, "Mudanças de preço", w::semibold(14.0), colors.text);
+        for a in list {
+            let desc = a["desc"].as_str().unwrap_or("Conta");
+            let recent = a["recent_cents"].as_i64().unwrap_or(0);
+            let average = a["average_cents"].as_i64().unwrap_or(0);
+            w::caption(ui, format!("{desc}: {} (média {})", money(recent), money(average)));
+        }
+        ui.add_space(w::GROUP_GAP);
+    }
+    if let Some(list) = report["fechamentos"].as_array().filter(|l| !l.is_empty()) {
+        for f in list {
+            let nome = f["nome"].as_str().unwrap_or("Cartão");
+            let dias = f["dias"].as_u64().unwrap_or(0);
+            w::caption(ui, format!("{} {} fecha {}", icon::CLOCK, nome, match dias {
+                0 => "hoje".into(),
+                1 => "amanhã".into(),
+                n => format!("em {n} dias"),
+            }));
+        }
     }
 }
 

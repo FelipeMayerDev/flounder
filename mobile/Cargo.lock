@@ -1161,10 +1161,19 @@ dependencies = [
  "eframe",
  "egui",
  "egui-phosphor",
+ "flounder-core",
  "image",
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "flounder-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1176,6 +1185,7 @@ dependencies = [
  "egui-phosphor",
  "egui_kittest",
  "flounder",
+ "serde_json",
  "winit",
 ]
 

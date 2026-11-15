@@ -20,12 +20,22 @@ pub const CORES_BANCOS: [Color32; 8] = [
 pub struct Mes {
     pub vazio: bool,
     pub salario_cents: i64,
+    /// Totais do mês (entradas, saídas) — vêm da mesma regra do desktop (`model::cash_flow`).
+    pub entradas_cents: i64,
+    pub saidas_cents: i64,
     pub saldo: Saldo,
     pub reparticao: Vec<Reparte>,
     pub pagar: Pagar,
     pub cartoes: Cartoes,
     pub casa: Casa,
     pub fluxo: Vec<DiaFluxo>,
+    /// Orçamentos do mês: (categoria, gasto de quem usa o app, limite), do mais estourado
+    /// ao mais folgado (`model::budget_usage`).
+    pub orcamentos: Vec<(String, i64, i64)>,
+    /// Contas fixas fora da média: (descrição, valor recente, média) (`model::price_alerts`).
+    pub alertas_preco: Vec<(String, i64, i64)>,
+    /// Primeiro cartão (meu, conectado) que fecha em ≤ 3 dias: (banco, dias); 0 = hoje.
+    pub fechamento_alerta: Option<(String, u32)>,
 }
 
 pub struct Saldo {
@@ -78,12 +88,20 @@ pub struct Cartao {
     pub banco: String,
     pub cor: Color32,
     pub aberta: bool,
-    /// "fecha em 18 dias" (0 = fatura fechada).
+    /// "fecha em N dias" — dias até a próxima ocorrência do fechamento (0 = fecha hoje,
+    /// ou sem fechamento informado — ver `fechamento_dia`).
     pub fecha_dias: u32,
+    /// Dia do fechamento do ciclo; None = não informado (compras caem no mês civil).
+    pub fechamento_dia: Option<u8>,
     pub vence_dia: u8,
     pub fatura_label: String,
     pub total_cents: i64,
     pub compras: u32,
+    /// Compras feitas no/do fechamento em diante: já caem na fatura seguinte.
+    pub proximo_total_cents: i64,
+    pub proximo_qtd: u32,
+    /// Totais projetados dos próximos vencimentos ("dez 26", centavos), só os não zerados.
+    pub proximas: Vec<(String, i64)>,
     pub disponivel_cents: i64,
     pub limite_cents: i64,
     pub paga: bool,
@@ -139,12 +157,20 @@ pub struct Entrada {
     pub paid: bool,
 }
 
+/// Orçamentos de demonstração (os mesmos da história do mock: mercado em 80%, lazer folgado).
+pub fn orcamentos_demo() -> Vec<flounder::api::Budget> {
+    vec![
+        flounder::api::Budget { category: "groceries".into(), monthly_cents: 600_00 },
+        flounder::api::Budget { category: "leisure".into(), monthly_cents: 200_00 },
+    ]
+}
+
 /// Dados do mês; meses sem nada voltam `Mes::VAZIO`.
 pub fn para(y: i32, m: u8) -> Mes {
     match (y, m) {
         (2026, 12) => dezembro(),
         (2026, 11) => novembro(),
-        _ => Mes { vazio: true, salario_cents: 0, saldo: Saldo { centavos: 0, pct_livre: 0 }, reparticao: vec![], pagar: Pagar { dia: 1, total_cents: 0, contas: vec![], dias: vec![] }, cartoes: Cartoes { total_faturas_cents: 0, cards: vec![] }, casa: Casa { total_contas: 0, pendentes_qtd: 0, pendentes_total_cents: 0, saldo_acerto: 0, acertos: vec![], bills: vec![] }, fluxo: vec![] },
+        _ => Mes { vazio: true, salario_cents: 0, entradas_cents: 0, saidas_cents: 0, saldo: Saldo { centavos: 0, pct_livre: 0 }, reparticao: vec![], pagar: Pagar { dia: 1, total_cents: 0, contas: vec![], dias: vec![] }, cartoes: Cartoes { total_faturas_cents: 0, cards: vec![] }, casa: Casa { total_contas: 0, pendentes_qtd: 0, pendentes_total_cents: 0, saldo_acerto: 0, acertos: vec![], bills: vec![] }, fluxo: vec![], orcamentos: vec![], alertas_preco: vec![], fechamento_alerta: None },
     }
 }
 
@@ -154,10 +180,20 @@ impl Mes {
     }
 }
 
+/// Aviso de fechamento do cartão da história com vencimento mais perto (Nubank, dia 15).
+/// Só dispara quando falta ≤ 3 dias (0 = fecha hoje).
+fn alerta_nubank() -> Option<(String, u32)> {
+    let dias = crate::converter::fecha_em_dias(Some(15), flounder::model::today());
+    (dias <= 3).then(|| ("Nubank".into(), dias))
+}
+
 fn dezembro() -> Mes {
     Mes {
         vazio: false,
         salario_cents: 2_800_000,
+        // Entradas e saídas do fluxo de baixo (Salário + Freelance; despesas com sinal trocado).
+        entradas_cents: 2_950_000,
+        saidas_cents: 1_587_294,
         saldo: Saldo { centavos: 530_428, pct_livre: 19 },
         reparticao: vec![
             Reparte { label: "Sua meta da casa".into(), centavos: 766_622, pct: 27, cor: Color32::from_rgb(23, 61, 156) },
@@ -186,11 +222,16 @@ fn dezembro() -> Mes {
                     banco: "Santander Unique".into(),
                     cor: Color32::from_rgb(234, 29, 37),
                     aberta: true,
-                    fecha_dias: 18,
+                    fecha_dias: crate::converter::fecha_em_dias(Some(20), flounder::model::today()),
+                    fechamento_dia: Some(20),
                     vence_dia: 5,
                     fatura_label: "Fatura de dezembro".into(),
                     total_cents: 799_970,
                     compras: 7,
+                    proximo_total_cents: 0,
+                    proximo_qtd: 0,
+                    // Compras depois do fechamento de dezembro ainda não começaram (jan 27 zerado).
+                    proximas: vec![],
                     disponivel_cents: 1_387_030,
                     limite_cents: 6_500_000,
                     paga: false,
@@ -199,11 +240,15 @@ fn dezembro() -> Mes {
                     banco: "Nubank".into(),
                     cor: Color32::from_rgb(130, 10, 209),
                     aberta: true,
-                    fecha_dias: 24,
+                    fecha_dias: crate::converter::fecha_em_dias(Some(15), flounder::model::today()),
+                    fechamento_dia: Some(15),
                     vence_dia: 12,
                     fatura_label: "Fatura de dezembro".into(),
                     total_cents: 183_000,
                     compras: 4,
+                    proximo_total_cents: 0,
+                    proximo_qtd: 0,
+                    proximas: vec![],
                     disponivel_cents: 530_000,
                     limite_cents: 1_000_000,
                     paga: false,
@@ -257,6 +302,11 @@ fn dezembro() -> Mes {
                 Entrada { id: 0, desc: "Água".into(), centavos: -54_700, membro: 0, shared: true, card: None, paid: false },
             ] },
         ],
+        // História: mercado em 80% do orçamento (âmbar) e lazer folgado; a Luz de dezembro
+        // veio 56% acima da média do ano.
+        orcamentos: vec![("groceries".into(), 480_00, 600_00), ("leisure".into(), 45_00, 200_00)],
+        alertas_preco: vec![("Luz".into(), 34_000, 21_800)],
+        fechamento_alerta: alerta_nubank(),
     }
 }
 
@@ -264,6 +314,8 @@ fn novembro() -> Mes {
     Mes {
         vazio: false,
         salario_cents: 2_800_000,
+        entradas_cents: 2_800_000,
+        saidas_cents: 759_254,
         saldo: Saldo { centavos: 312_650, pct_livre: 11 },
         reparticao: vec![
             Reparte { label: "Sua meta da casa".into(), centavos: 766_622, pct: 27, cor: Color32::from_rgb(23, 61, 156) },
@@ -274,9 +326,12 @@ fn novembro() -> Mes {
         pagar: Pagar { dia: 1, total_cents: 871_254, contas: vec![], dias: vec![(1, 3, 871_254), (5, 1, 34_000)] },
         cartoes: Cartoes {
             total_faturas_cents: 921_400,
+            // Compras feitas depois do fechamento de novembro (dia 20/15) já estão na
+            // fatura de dezembro — a "fatura em formação" que a tela mostra (e o primeiro
+            // vencimento da lista de próximas).
             cards: vec![
-                Cartao { banco: "Santander Unique".into(), cor: Color32::from_rgb(234, 29, 37), aberta: false, fecha_dias: 0, vence_dia: 5, fatura_label: "Fatura de novembro".into(), total_cents: 742_100, compras: 9, disponivel_cents: 1_451_900, limite_cents: 6_500_000, paga: true },
-                Cartao { banco: "Nubank".into(), cor: Color32::from_rgb(130, 10, 209), aberta: false, fecha_dias: 0, vence_dia: 12, fatura_label: "Fatura de novembro".into(), total_cents: 179_300, compras: 5, disponivel_cents: 533_700, limite_cents: 1_000_000, paga: true },
+                Cartao { banco: "Santander Unique".into(), cor: Color32::from_rgb(234, 29, 37), aberta: false, fecha_dias: crate::converter::fecha_em_dias(Some(20), flounder::model::today()), fechamento_dia: Some(20), vence_dia: 5, fatura_label: "Fatura de novembro".into(), total_cents: 742_100, compras: 9, proximo_total_cents: 84_600, proximo_qtd: 2, proximas: vec![("dez 26".into(), 84_600)], disponivel_cents: 1_451_900, limite_cents: 6_500_000, paga: true },
+                Cartao { banco: "Nubank".into(), cor: Color32::from_rgb(130, 10, 209), aberta: false, fecha_dias: crate::converter::fecha_em_dias(Some(15), flounder::model::today()), fechamento_dia: Some(15), vence_dia: 12, fatura_label: "Fatura de novembro".into(), total_cents: 179_300, compras: 5, proximo_total_cents: 25_900, proximo_qtd: 1, proximas: vec![("dez 26".into(), 25_900)], disponivel_cents: 533_700, limite_cents: 1_000_000, paga: true },
             ],
         },
         casa: Casa {
@@ -300,5 +355,8 @@ fn novembro() -> Mes {
                 Entrada { id: 0, desc: "Presente de aniversário".into(), centavos: -12_000, membro: 1, shared: false, card: None, paid: false },
             ] },
         ],
+        orcamentos: vec![("groceries".into(), 480_00, 600_00), ("leisure".into(), 45_00, 200_00)],
+        alertas_preco: vec![("Luz".into(), 34_000, 21_800)],
+        fechamento_alerta: alerta_nubank(),
     }
 }

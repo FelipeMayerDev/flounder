@@ -1,6 +1,8 @@
 //! Tela Início — saldo previsto do mês com a repartição do salário e as contas a pagar por dia.
+//! Acima de tudo, o aviso de fechamento de cartão; abaixo, os orçamentos do mês e os
+//! alertas de preço das contas fixas.
 
-use egui::{Align, Align2, Color32, Layout, Sense, Vec2, pos2};
+use egui::{Align, Align2, Color32, Frame, Layout, Margin, Sense, Vec2, pos2};
 use egui_phosphor::regular as icon;
 use flounder::widgets as w;
 
@@ -10,8 +12,152 @@ use crate::theme::{self, Cores};
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let c = theme::cores();
+    // Aviso de fechamento: fatura de um cartão conectado fecha em ≤ 3 dias.
+    if let Some((banco, dias)) = app.dados.fechamento_alerta.clone() {
+        banner_fechamento(ui, &banco, dias, &c);
+        ui.add_space(2.0);
+    }
     card_saldo(ui, app, &c);
+    if !app.dados.orcamentos.is_empty() {
+        card_orcamentos(ui, app, &c);
+    }
+    if !app.dados.alertas_preco.is_empty() {
+        card_alertas(ui, app, &c);
+    }
     card_pagar(ui, app, &c);
+}
+
+/// Rótulo amigável da categoria do orçamento (chave `Category::key`).
+pub(crate) fn rotulo_categoria(key: &str) -> &'static str {
+    match key {
+        "groceries" => "Mercado",
+        "transport" => "Transporte",
+        "utilities" => "Luz/Água",
+        "housing" => "Moradia",
+        "health" => "Saúde",
+        "leisure" => "Lazer",
+        "shopping" => "Compras",
+        "services" => "Serviços",
+        "education" => "Educação",
+        "other" => "Outros",
+        _ => "Categoria",
+    }
+}
+
+/// Faixa de aviso do fechamento: vermelho quando fecha hoje, âmbar nos outros dias.
+fn banner_fechamento(ui: &mut egui::Ui, banco: &str, dias: u32, c: &Cores) {
+    let (cor, fundo) = if dias == 0 { (c.red, c.red_soft) } else { (c.orange, c.orange_soft) };
+    let prazo = match dias {
+        0 => "fecha hoje".to_owned(),
+        1 => "fecha amanhã".to_owned(),
+        n => format!("fecha em {n} dias"),
+    };
+    let detalhe = match dias {
+        0 => "Compras de hoje já vão para a próxima fatura.",
+        1 => "Compras de amanhã já vão para a próxima fatura.",
+        _ => "Compras no dia do fechamento já vão para a próxima fatura.",
+    };
+    Frame::new()
+        .fill(fundo)
+        .corner_radius(16)
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.label(egui::RichText::new(icon::WARNING).font(w::bold(16.0)).color(cor));
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Fatura {banco} {prazo}"))
+                            .font(w::semibold(13.5))
+                            .color(cor),
+                    );
+                    ui.label(egui::RichText::new(detalhe).font(w::regular(12.0)).color(cor));
+                });
+            });
+        });
+}
+
+/// Card "Orçamento do mês": uma linha por categoria com barra de progresso.
+/// Vermelho em 100% ou mais, âmbar a partir de 80%.
+fn card_orcamentos(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
+    let orcamentos: Vec<(String, i64, i64)> = app.dados.orcamentos.clone();
+    theme::card(ui, |ui| {
+        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Orçamento do mês").font(w::bold(16.0)).color(c.ink));
+                ui.label(
+                    egui::RichText::new("O que você já usou do limite de cada categoria.")
+                        .font(w::regular(12.0))
+                        .color(c.muted),
+                );
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                w::art(ui, w::Art::MoneyBag, 44.0);
+            });
+        });
+        ui.add_space(10.0);
+        for (categoria, gasto, limite) in &orcamentos {
+            let frac = if *limite > 0 { *gasto as f32 / *limite as f32 } else { 0.0 };
+            let pct = (frac * 100.0).round() as i64;
+            let cor = if pct >= 100 {
+                c.red
+            } else if pct >= 80 {
+                c.orange
+            } else {
+                c.green
+            };
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(rotulo_categoria(categoria)).font(w::semibold(14.0)).color(c.ink));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Ordem right-to-left: % fica na ponta, depois o limite, o gasto à esquerda.
+                    ui.label(egui::RichText::new(format!("{pct}%")).font(w::semibold(12.0)).color(cor));
+                    ui.label(
+                        egui::RichText::new(format!("de R$ {}", fmt_money(*limite)))
+                            .font(w::regular(12.0))
+                            .color(c.muted),
+                    );
+                    theme::money(ui, *gasto, 14.0, cor);
+                });
+            });
+            ui.add_space(3.0);
+            theme::barra(ui, frac, cor, 7.0);
+            ui.add_space(10.0);
+        }
+    });
+}
+
+/// Card "Alertas de preço": contas fixas que vieram bem acima da média histórica.
+fn card_alertas(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
+    let alertas: Vec<(String, i64, i64)> = app.dados.alertas_preco.clone();
+    theme::card(ui, |ui| {
+        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Alertas de preço").font(w::bold(16.0)).color(c.ink));
+                ui.label(
+                    egui::RichText::new("Contas que fugiram da média dos meses anteriores.")
+                        .font(w::regular(12.0))
+                        .color(c.muted),
+                );
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                w::art(ui, w::Art::SpiralCalendar, 44.0);
+            });
+        });
+        ui.add_space(10.0);
+        for (desc, recente, media) in &alertas {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{desc}:")).font(w::semibold(14.0)).color(c.ink));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(" (média R$ {})", fmt_money(*media)))
+                            .font(w::regular(12.0))
+                            .color(c.muted),
+                    );
+                    theme::money(ui, *recente, 14.0, c.orange);
+                });
+            });
+            ui.add_space(6.0);
+        }
+    });
 }
 
 /// Card "Saldo previsto": total, barra da repartição e campo da renda do mês no rodapé.

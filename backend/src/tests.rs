@@ -127,7 +127,8 @@ async fn mock(State(state): State<Arc<Mock>>, request: Request) -> Response {
 
 fn account(id: &str) -> Value {
     json!({"id": id, "type": "CREDIT", "name":"platinum","marketingName":null,"number":"123456781234","currencyCode":"BRL","balance":123.45,
-        "updatedAt":"2026-11-10T12:34:56.789Z","creditData": {"creditLimit": 1000.0,"availableCreditLimit":876.55,"brand":"MASTERCARD","balanceDueDate":"2026-11-25T00:00:00Z"}})
+        "updatedAt":"2026-11-10T12:34:56.789Z","creditData": {"creditLimit": 1000.0,"availableCreditLimit":876.55,"brand":"MASTERCARD",
+        "balanceDueDate":"2026-11-25T00:00:00Z","balanceCloseDate":"2026-11-20T00:00:00Z"}})
 }
 
 /// Data UTC de `days_ago` dias atrás (AAAA-MM-DD), para ficar dentro da janela de 12 meses.
@@ -193,7 +194,7 @@ fn transactions(account: &str, after: Option<&str>, pending: bool) -> Value {
 }
 
 fn bill() -> Value {
-    json!({"dueDate":"2099-11-25","totalAmount": 123.45,"totalAmountCurrencyCode":"BRL"})
+    json!({"dueDate":"2099-11-25","closeDate":"2099-11-20","totalAmount": 123.45,"totalAmountCurrencyCode":"BRL"})
 }
 
 fn unused_database() -> tokio_postgres::Config {
@@ -667,6 +668,61 @@ async fn card_import_persists_per_owner_replaces_on_reload_and_never_reassigns_i
         assert_eq!(owner, "client-1");
         assert_eq!(count(&db, "cards").await, 2);
         std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn closing_day_flows_from_pluggy_and_the_manual_override_wins() {
+    with_database(|database, db| async move {
+        let (api, _state, _upstream) = setup_with(database, None).await;
+        let http = reqwest::Client::new();
+        assert_eq!(load_item(&api, "item-one", TOKEN_1).await, StatusCode::OK);
+
+        // Pluggy: fechamento no dia 20, vencimento no dia 25; a fatura carrega a data de fechamento.
+        let cards = api_state(&api, TOKEN_1).await.cards;
+        assert_eq!((cards[0].closing_day, cards[0].due_day), (Some(20), Some(25)));
+        assert_eq!(cards[0].bills[0].closing.as_deref(), Some("2099-11-20"));
+
+        // Ajuste manual vence o valor da Pluggy e sobrevive à reimportação.
+        let put = |day: Value| {
+            let http = http.clone();
+            let url = format!("{}/api/cards/card-item-one/closing-day", api.url);
+            async move { http.put(url).bearer_auth(TOKEN_1).json(&json!({"day": day})).send().await.unwrap() }
+        };
+        assert_eq!(put(json!(10)).await.status(), StatusCode::NO_CONTENT);
+        let cards = api_state(&api, TOKEN_1).await.cards;
+        assert_eq!((cards[0].closing_day, cards[0].due_day), (Some(10), Some(25)));
+        assert_eq!(load_item(&api, "item-one", TOKEN_1).await, StatusCode::OK);
+        assert_eq!(api_state(&api, TOKEN_1).await.cards[0].closing_day, Some(10));
+
+        // Sem ajuste, volta ao valor vindo da Pluggy.
+        assert_eq!(put(json!(null)).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(api_state(&api, TOKEN_1).await.cards[0].closing_day, Some(20));
+
+        // Dia inválido e cartão inexistente ou de outro domicílio: recusados.
+        for day in [0, 32] {
+            let response = put(json!(day)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{day}");
+            assert!(response.json::<Value>().await.unwrap()["error"].is_string());
+        }
+        assert_eq!(api_state(&api, TOKEN_1).await.cards[0].closing_day, Some(20));
+        let response = http
+            .put(format!("{}/api/cards/card-unknown/closing-day", api.url))
+            .bearer_auth(TOKEN_1)
+            .json(&json!({"day": 10}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Sem o dia da Pluggy e sem ajuste, o dia cai na fatura mais recente
+        // (fechamento e vencimento dela).
+        db.execute("UPDATE card_invoices SET closing_date = '2099-11-18'", &[]).await.unwrap();
+        db.execute("UPDATE cards SET closing_day = NULL, due_day = NULL, due_date = NULL", &[]).await.unwrap();
+        let cards = api_state(&api, TOKEN_1).await.cards;
+        assert_eq!(cards[0].closing_day, Some(18), "fechamento vem da fatura mais recente");
+        assert_eq!(cards[0].due_day, Some(25), "vencimento vem da fatura mais recente");
     })
     .await;
 }
@@ -1156,6 +1212,166 @@ async fn reports_of(api: &Running, token: &str) -> api::AssistantReports {
         .unwrap()
 }
 
+/// Z.ai falso por roteiro: devolve as respostas na ordem (a última se repete) e guarda os
+/// corpos dos pedidos, para provar o vai-e-vem das ferramentas entre o backend e o modelo.
+async fn setup_with_zai_script(
+    database: tokio_postgres::Config,
+    script: Arc<Mutex<Vec<Value>>>,
+    calls: Arc<Mutex<Vec<Value>>>,
+) -> (Running, Running, Running) {
+    let zai = spawn(Router::new().fallback(move |headers: axum::http::HeaderMap, body: String| {
+        let script = script.clone();
+        let calls = calls.clone();
+        async move {
+            assert_eq!(
+                headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                Some("Bearer zai-test-token"),
+                "o token do GLM vai só ao Z.ai"
+            );
+            let body: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["model"], "glm-5.3");
+            assert!(body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "system"));
+            calls.lock().await.push(body);
+            let mut script = script.lock().await;
+            let next = if script.len() > 1 { script.remove(0) } else { script[0].clone() };
+            Json(next).into_response()
+        }
+    }))
+    .await;
+    let state = Arc::new(Mock::default());
+    let upstream = spawn(Router::new().fallback(mock).with_state(state.clone())).await;
+    let config = Config {
+        client_id: "test-id".into(),
+        client_secret: "test-secret".into(),
+        tokens: [TOKEN_1.into(), TOKEN_2.into()],
+        bind: "127.0.0.1:3001".parse().unwrap(),
+        database,
+        institutions: None,
+        zai_token: Some("zai-test-token".into()),
+        zai_base: zai.url.clone(),
+        zai_model: "glm-5.3".into(),
+        pairing_codes: [None, None],
+        releases_dir: None,
+    };
+    let api = spawn(build_router(config, &upstream.url, None).unwrap()).await;
+    (api, upstream, zai)
+}
+
+#[tokio::test]
+async fn chat_with_tools_executes_actions_reports_ops_and_sends_results_back() {
+    with_database(|database, _db| async move {
+        let script = Arc::new(Mutex::new(vec![
+            // 1ª resposta: o modelo pede a criação do lançamento.
+            json!({"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "call-1", "type": "function",
+                "function": {"name": "criar_lancamento",
+                    "arguments": r#"{"descricao":"Aluguel","valor_centavos":120000,"data":"2026-11-15","tipo":"expense","categoria":"housing","compartilhado":true}"#},
+            }]}}]}),
+            // 2ª resposta: o texto final, já sabendo o resultado da ferramenta.
+            json!({"choices": [{"message": {"role": "assistant", "content": "Feito! Criei a despesa Aluguel (R$ 1.200,00) em 15/11, já do casal. 🐠"}}]}),
+        ]));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (api, _upstream, _zai) = setup_with_zai_script(database, script, calls.clone()).await;
+        let http = reqwest::Client::new();
+        let reply: api::ChatReply = send(
+            http.post(format!("{}/api/assistant/chat", api.url)),
+            TOKEN_1,
+            json!({"messages": [{"role": "user", "content": "Crie a despesa Aluguel de R$ 1.200,00 no dia 15, do casal."}]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(reply.content, "Feito! Criei a despesa Aluguel (R$ 1.200,00) em 15/11, já do casal. 🐠");
+        assert_eq!(
+            reply.ops,
+            [api::Op { tool: "criar_lancamento".into(), label: "criou despesa Aluguel R$ 1.200,00 em 15/11".into() }]
+        );
+
+        // O lançamento está no estado, criado por quem conversou (dono = Felipe, posição 0).
+        let entries = api_state(&api, TOKEN_1).await.entries;
+        let [aluguel] = entries.as_slice() else {
+            panic!("esperava um lançamento criado pela ferramenta, veio: {entries:?}");
+        };
+        assert_eq!(
+            (aluguel.description.as_str(), aluguel.amount_cents, aluguel.shared, aluguel.owner, aluguel.date.as_str(), aluguel.paid),
+            ("Aluguel", 120000, true, 0, "2026-11-15", false)
+        );
+
+        // O segundo pedido ao Z.ai carrega o pedido de ferramenta e o resultado dela (com o id).
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2, "uma rodada de ferramenta + a resposta final");
+        assert_eq!(calls[0]["tool_choice"], "auto");
+        assert!(
+            calls[0]["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "criar_lancamento"),
+            "o primeiro pedido apresenta as ferramentas"
+        );
+        let messages = calls[1]["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|m| m["role"] == "assistant" && m["tool_calls"][0]["id"] == "call-1"));
+        let tool = messages.iter().find(|m| m["role"] == "tool").expect("o resultado da ferramenta volta ao modelo");
+        assert_eq!(tool["tool_call_id"], "call-1");
+        let resultado: Value = serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+        assert_eq!(resultado["criado"]["id"], aluguel.id);
+        assert_eq!(resultado["criado"]["valor_centavos"], 120000);
+    })
+    .await;
+}
+
+/// A regra de privacidade na execução: `buscar_lancamentos` de um membro nunca devolve os
+/// lançamentos individuais do outro — só os dele e os compartilhados do casal.
+#[tokio::test]
+async fn buscar_lancamentos_hides_the_partners_individual_entries() {
+    with_database(|_database, db| async move {
+        db.batch_execute(
+            "INSERT INTO entries(household_id, owner_id, description, amount_cents, entry_date, kind, category_key, shared)
+             SELECT household_id, id, d.descricao, d.valor, '2026-11-10', 'expense', d.categoria, d.compartilhado
+             FROM members, (VALUES ('Mercado do Felipe', 5000, false, 'groceries'), ('Aluguel', 100000, true, 'housing'),
+                 ('Mercado da Larissa', 6000, false, 'groceries')) AS d(descricao, valor, compartilhado, categoria)
+             WHERE client_user_id = CASE WHEN d.descricao = 'Mercado da Larissa' THEN 'client-2' ELSE 'client-1' END",
+        )
+        .await
+        .unwrap();
+        // Felipe (posição 0) vê os próprios e o compartilhado; nunca o mercado pessoal de Larissa.
+        let resultado = tools::run(&db, User("client-1"), 0, "buscar_lancamentos", &json!({})).await.unwrap();
+        let descricoes: Vec<&str> = resultado.result["lancamentos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["descricao"].as_str().unwrap())
+            .collect();
+        assert!(descricoes.contains(&"Mercado do Felipe") && descricoes.contains(&"Aluguel"), "{descricoes:?}");
+        assert!(!descricoes.contains(&"Mercado da Larissa"), "{descricoes:?}");
+        // Larissa vê o espelho: os dela e o compartilhado, com o filtro de texto aplicado.
+        let resultado = tools::run(&db, User("client-2"), 1, "buscar_lancamentos", &json!({"texto": "Mercado"})).await.unwrap();
+        let descricoes: Vec<&str> = resultado.result["lancamentos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["descricao"].as_str().unwrap())
+            .collect();
+        assert_eq!(descricoes, ["Mercado da Larissa"], "{descricoes:?}");
+        // O resultado da busca traz o que a conversa precisa para editar e excluir.
+        let resultado = tools::run(&db, User("client-1"), 0, "buscar_lancamentos", &json!({"categoria": "housing", "mes": "2026-11"})).await.unwrap();
+        let lancamentos = resultado.result["lancamentos"].as_array().unwrap();
+        let [aluguel] = lancamentos.as_slice() else {
+            panic!("esperava só o Aluguel na categoria housing, veio: {lancamentos:?}");
+        };
+        assert_eq!(
+            (
+                aluguel["id"].is_string(),
+                aluguel["data"].clone(),
+                aluguel["valor_centavos"].clone(),
+                aluguel["tipo"].clone(),
+                aluguel["compartilhado"].clone(),
+                aluguel["dono"].clone()
+            ),
+            (true, json!("2026-11-10"), json!(100000), json!("expense"), json!(true), json!("Felipe"))
+        );
+        assert_eq!(resultado.ops[0].tool, "buscar_lancamentos");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn assistant_keeps_reports_private_generates_once_and_chats_with_the_mock_glm() {
     with_database(|database, _db| async move {
@@ -1226,6 +1442,7 @@ async fn assistant_keeps_reports_private_generates_once_and_chats_with_the_mock_
         .await
         .unwrap();
         assert!(reply.content.contains("Análise falsa"));
+        assert!(reply.ops.is_empty(), "conversa sem ferramentas não executa ação nenhuma");
         assert!(calls.load(Ordering::SeqCst) >= 4);
         // Histórico que não termina com mensagem do usuário: erro claro, sem chamar o GLM.
         let before = calls.load(Ordering::SeqCst);
@@ -1237,6 +1454,395 @@ async fn assistant_keeps_reports_private_generates_once_and_chats_with_the_mock_
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(calls.load(Ordering::SeqCst), before);
+    })
+    .await;
+}
+
+// ───────────────────────── Orçamentos, histórico e rotina do mês ─────────────────────────
+
+/// Orçamentos: upsert pela categoria, leitura no estado (do domicílio, para os dois),
+/// remoção com valor <= 0 e categoria inválida recusada.
+#[tokio::test]
+async fn budgets_upsert_remove_and_validate_by_category() {
+    with_database(|database, _db| async move {
+        let (api, _state, _upstream) = setup_with(database, None).await;
+        let http = reqwest::Client::new();
+        let put = |token: &'static str, body: Value| {
+            let http = http.clone();
+            let url = format!("{}/api/budgets", api.url);
+            async move { send(http.put(url), token, body).await }
+        };
+        assert_eq!(put(TOKEN_1, json!({"category": "groceries", "monthly_cents": 30000})).await.status(), StatusCode::NO_CONTENT);
+        // Upsert: mesma categoria com outro limite substitui o anterior.
+        assert_eq!(put(TOKEN_2, json!({"category": "groceries", "monthly_cents": 50000})).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(put(TOKEN_2, json!({"category": "transport", "monthly_cents": 100000})).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            api_state(&api, TOKEN_1).await.budgets,
+            [
+                api::Budget { category: "groceries".into(), monthly_cents: 50000 },
+                api::Budget { category: "transport".into(), monthly_cents: 100000 },
+            ]
+        );
+        // Valor <= 0 remove o orçamento da categoria.
+        assert_eq!(put(TOKEN_1, json!({"category": "groceries", "monthly_cents": 0})).await.status(), StatusCode::NO_CONTENT);
+        assert_eq!(put(TOKEN_1, json!({"category": "transport", "monthly_cents": -1})).await.status(), StatusCode::NO_CONTENT);
+        assert!(api_state(&api, TOKEN_2).await.budgets.is_empty());
+        // Categoria inexistente no catálogo: recusada.
+        let response = put(TOKEN_1, json!({"category": "feijoada", "monthly_cents": 500})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.json::<Value>().await.unwrap()["error"].is_string());
+    })
+    .await;
+}
+
+/// A conversa persiste por membro (histórico, com os ops, na ordem; apagar é só o meu) e
+/// cada ação executada pelas ferramentas entra na auditoria do membro.
+#[tokio::test]
+async fn chat_persists_history_per_member_and_audits_actions() {
+    with_database(|database, _db| async move {
+        let script = Arc::new(Mutex::new(vec![
+            // 1ª resposta: o modelo pede o orçamento do mercado.
+            json!({"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "call-1", "type": "function",
+                "function": {"name": "definir_orcamento", "arguments": r#"{"categoria":"groceries","monthly_cents":30000}"#},
+            }]}}]}),
+            // 2ª resposta: o texto final.
+            json!({"choices": [{"message": {"role": "assistant", "content": "Orçamento de Mercado definido em R$ 300,00 por mês. 🐠"}}]}),
+        ]));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (api, _upstream, _zai) = setup_with_zai_script(database, script, calls.clone()).await;
+        let http = reqwest::Client::new();
+        let history_of = |token: &'static str| {
+            let http = http.clone();
+            let url = format!("{}/api/assistant/history", api.url);
+            async move {
+                http.get(&url).bearer_auth(token).send().await.unwrap().json::<api::ChatHistory>().await.unwrap()
+            }
+        };
+        let reply: api::ChatReply = send(
+            http.post(format!("{}/api/assistant/chat", api.url)),
+            TOKEN_1,
+            json!({"messages": [{"role": "user", "content": "Define o orçamento do mercado em 300 reais."}]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(reply.ops.len(), 1);
+
+        // Histórico do membro: a pergunta e a resposta (com os ops), mais antigas primeiro.
+        let history = history_of(TOKEN_1).await;
+        assert_eq!(history.messages.len(), 2);
+        assert_eq!(
+            (history.messages[0].role.as_str(), history.messages[0].content.as_str()),
+            ("user", "Define o orçamento do mercado em 300 reais.")
+        );
+        assert!(history.messages[0].ops.is_empty());
+        assert_eq!(history.messages[1].role, "assistant");
+        assert_eq!(history.messages[1].content, "Orçamento de Mercado definido em R$ 300,00 por mês. 🐠");
+        assert_eq!(history.messages[1].ops, reply.ops);
+        // A ferramenta executada valendo: o orçamento está no estado, para os dois.
+        assert_eq!(
+            api_state(&api, TOKEN_2).await.budgets,
+            [api::Budget { category: "groceries".into(), monthly_cents: 30000 }]
+        );
+
+        // Larissa conversa em outro papo: histórico separado por membro.
+        let _: api::ChatReply = send(
+            http.post(format!("{}/api/assistant/chat", api.url)),
+            TOKEN_2,
+            json!({"messages": [{"role": "user", "content": "Oi!"}]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        let dela = history_of(TOKEN_2).await;
+        assert_eq!(dela.messages.len(), 2);
+        assert_eq!(dela.messages[0].content, "Oi!");
+        assert_eq!(history_of(TOKEN_1).await.messages.len(), 2, "a conversa de Felipe não viu a de Larissa");
+
+        // Auditoria: a ação da ferramenta de Felipe, mais recente primeiro e em ISO UTC.
+        let actions: api::ActionLog = http
+            .get(format!("{}/api/assistant/actions", api.url))
+            .bearer_auth(TOKEN_1)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            actions.actions,
+            [api::ActionRecord {
+                tool: "definir_orcamento".into(),
+                label: "definiu orçamento de groceries: R$ 300,00 por mês".into(),
+                at: actions.actions[0].at.clone(),
+            }]
+        );
+        assert!(actions.actions[0].at.contains('T') && actions.actions[0].at.ends_with('Z'), "{}", actions.actions[0].at);
+        assert!(http.get(format!("{}/api/assistant/actions", api.url)).bearer_auth(TOKEN_2).send().await.unwrap().json::<api::ActionLog>().await.unwrap().actions.is_empty());
+
+        // Limpar a conversa: só a de quem pede; a auditoria fica.
+        assert_eq!(http.delete(format!("{}/api/assistant/history", api.url)).bearer_auth(TOKEN_1).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert!(history_of(TOKEN_1).await.messages.is_empty());
+        assert_eq!(history_of(TOKEN_2).await.messages.len(), 2);
+        let actions: api::ActionLog = http
+            .get(format!("{}/api/assistant/actions", api.url))
+            .bearer_auth(TOKEN_1)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(actions.actions.len(), 1, "apagar a conversa não apaga a auditoria");
+    })
+    .await;
+}
+
+/// Rotina "fechar o mês": copia o mês anterior (pulando duplicados), lista as faturas do mês
+/// (não pagas primeiro), sugere o acerto do casal, aponta a conta fixa fora da média e os
+/// fechamentos dos cartões de quem pede; mês explícito é respeitado e cada cópia entra na
+/// auditoria.
+#[tokio::test]
+async fn routine_month_copies_bills_settlement_and_alerts() {
+    with_database(|database, db| async move {
+        let (api, _state, _upstream) = setup_with(database, None).await;
+        let http = reqwest::Client::new();
+        // Meses de referência no fuso do app: atual, anterior e o anterior deste.
+        let (mes, anterior, tras): (String, String, String) = {
+            let row = db
+                .query_one(
+                    "SELECT to_char(date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM'),
+                            to_char((date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo') - interval '1 month'), 'YYYY-MM'),
+                            to_char((date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo') - interval '2 months'), 'YYYY-MM')",
+                    &[],
+                )
+                .await
+                .unwrap();
+            (row.get(0), row.get(1), row.get(2))
+        };
+        let hoje: String = db
+            .query_one("SELECT to_char(now() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD')", &[])
+            .await
+            .unwrap()
+            .get(0);
+        // Sementes: Luz em conta fixa (barata no mês retrás, cara no anterior → alerta),
+        // aluguel compartilhado (gera saldo de acerto), lançamentos a copiar e a fatura do
+        // cartão do Felipe no mês atual. Internet já existe no mês atual (duplicada a pular).
+        db.batch_execute(&format!(
+            "INSERT INTO entries(household_id, owner_id, description, amount_cents, entry_date, kind, category_key, shared, paid, recurring)
+             SELECT household_id, id, v.descricao, v.valor, v.dia::date, 'expense', v.categoria, v.compartilhada, true, v.fixa
+             FROM members, (VALUES
+                 ('Luz', 5000, '{tras}-05', 'utilities', false, true),
+                 ('Aluguel', 100000, '{tras}-10', 'housing', true, true),
+                 ('Streaming', 2990, '{tras}-15', 'leisure', false, false),
+                 ('Luz', 19000, '{anterior}-05', 'utilities', false, true),
+                 ('Internet', 9900, '{anterior}-08', 'services', false, true),
+                 ('Academia', 5000, '{anterior}-20', 'health', false, false)
+             ) AS v(descricao, valor, dia, categoria, compartilhada, fixa)
+             WHERE client_user_id = CASE WHEN v.descricao = 'Academia' THEN 'client-2' ELSE 'client-1' END;
+             INSERT INTO entries(household_id, owner_id, description, amount_cents, entry_date, kind, category_key, paid)
+             SELECT household_id, id, 'Internet', 9900, '{mes}-08'::date, 'expense', 'services', true
+             FROM members WHERE client_user_id = 'client-1';
+             WITH c AS (INSERT INTO bank_connections(household_id, owner_id, external_id)
+                        SELECT household_id, id, 'item-rot' FROM members WHERE client_user_id = 'client-1'
+                        RETURNING id, household_id, owner_id),
+                  a AS (INSERT INTO bank_accounts(household_id, owner_id, connection_id, external_id, kind, name, currency)
+                        SELECT household_id, owner_id, id, 'card-rot', 'CREDIT', 'Cartão', 'BRL' FROM c
+                        RETURNING id, household_id, owner_id),
+                  k AS (INSERT INTO cards(household_id, owner_id, account_id, name, closing_day, due_day)
+                        SELECT household_id, owner_id, id, 'Nubank', 20, 25 FROM a
+                        RETURNING id, household_id)
+             INSERT INTO card_invoices(household_id, card_id, due_date, closing_date, currency, total_cents, source, paid)
+             SELECT k.household_id, k.id, d.due::date, d.fech::date, 'BRL', d.total, 'pluggy', d.paga FROM k,
+                    (VALUES ('{mes}-25', '{mes}-20', 84000, false), ('{mes}-10', '{mes}-05', 50000, true))
+                        AS d(due, fech, total, paga);"
+        ))
+        .await
+        .unwrap();
+
+        // Primeira rodada: sem mês no corpo → fecha o mês atual.
+        let report: Value = send(http.post(format!("{}/api/routine/month", api.url)), TOKEN_1, json!({"month": ""}))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let copiados = report["copiados"].as_array().unwrap();
+        let mut nomes: Vec<&str> = copiados.iter().map(|c| c["descricao"].as_str().unwrap()).collect();
+        nomes.sort();
+        assert_eq!(nomes, ["Academia", "Luz"], "Internet já existia no mês e Streaming não é do mês anterior");
+        assert!(copiados.iter().all(|c| c["pago"] == json!(false)), "{copiados:?}");
+        // A cópia cai no mês atual, no mesmo dia e não paga, visível no estado.
+        let entries = api_state(&api, TOKEN_1).await.entries;
+        let luz = entries.iter().find(|e| e.description == "Luz" && e.date.starts_with(&mes)).unwrap();
+        assert_eq!((luz.date.as_str(), luz.amount_cents, luz.paid, luz.recurring), (format!("{mes}-05").as_str(), 19000, false, true));
+        let academia = entries.iter().find(|e| e.description == "Academia" && e.date.starts_with(&mes)).unwrap();
+        assert_eq!((academia.owner, academia.paid), (1, false));
+        // Faturas do mês: não pagas primeiro (a de 25 vem antes da paga de 10).
+        assert_eq!(
+            report["faturas"],
+            json!([
+                {"label": "Fatura Nubank", "due": format!("{mes}-25"), "total_cents": 84000, "paid": false},
+                {"label": "Fatura Nubank", "due": format!("{mes}-10"), "total_cents": 50000, "paid": true},
+            ])
+        );
+        // Acerto: metade do aluguel compartilhado do mês retrás — Bia deve a Felipe.
+        assert_eq!(report["acerto_sugerido"], json!({"valor_cents": 50000, "de": 1}));
+        // A Luz do mês anterior subiu 58% sobre a média das duas últimas.
+        assert_eq!(report["alertas_preco"], json!([{"desc": "Luz", "recent_cents": 19000, "average_cents": 12000}]));
+        // Fechamento do cartão de quem pediu, com os dias contados de hoje.
+        let dias = flounder_core::model::days_to_closing(20, flounder_core::model::Date::iso(&hoje).unwrap());
+        assert_eq!(report["fechamentos"], json!([{"nome": "Nubank", "dia_fechamento": 20, "dias": dias}]));
+
+        // Segunda rodada: nada a copiar (as cópias já estão lá).
+        let report: Value = send(http.post(format!("{}/api/routine/month", api.url)), TOKEN_1, json!({}))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(report["copiados"].as_array().unwrap().is_empty(), "{}", report["copiados"]);
+
+        // Mês inválido: erro claro.
+        let response = send(http.post(format!("{}/api/routine/month", api.url)), TOKEN_1, json!({"month": "que"})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Mês explícito: copia de {tras} para {anterior} (o parâmetro manda).
+        let report: Value = send(http.post(format!("{}/api/routine/month", api.url)), TOKEN_1, json!({"month": anterior.clone()}))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let copiados = report["copiados"].as_array().unwrap();
+        assert_eq!(copiados.len(), 3, "Luz (outro valor), Aluguel e Streaming: {}", copiados.len());
+        let streaming = copiados.iter().find(|c| c["descricao"] == "Streaming").unwrap();
+        assert_eq!(streaming["data"], json!(format!("{anterior}-15")));
+        let aluguel = copiados.iter().find(|c| c["descricao"] == "Aluguel").unwrap();
+        assert_eq!(aluguel["compartilhado"], json!(true));
+
+        // Auditoria: uma ação por lançamento copiado, da mais recente para a mais antiga.
+        let actions: api::ActionLog = http
+            .get(format!("{}/api/assistant/actions", api.url))
+            .bearer_auth(TOKEN_1)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(actions.actions.len(), 5, "2 cópias + 3 cópias da segunda rodada");
+        assert!(actions.actions.iter().all(|a| a.tool == "copiar_mes_anterior"));
+        assert!(actions.actions[0].label.contains("Streaming"), "{}", actions.actions[0].label);
+        assert!(actions.actions[0].at.contains('T') && actions.actions[0].at.ends_with('Z'));
+        // A auditoria é por membro: Larissa não vê as cópias rodadas por Felipe.
+        assert!(http
+            .get(format!("{}/api/assistant/actions", api.url))
+            .bearer_auth(TOKEN_2)
+            .send()
+            .await
+            .unwrap()
+            .json::<api::ActionLog>()
+            .await
+            .unwrap()
+            .actions
+            .is_empty());
+    })
+    .await;
+}
+
+/// Ferramentas: criar/editar avisam quando o total do casal estoura o orçamento da categoria,
+/// e `fechar_mes` devolve o relatório com um selo por cópia mais o resumo do mês.
+#[tokio::test]
+async fn tools_warn_when_the_budget_bursts_and_close_the_month() {
+    with_database(|_database, db| async move {
+        db::set_budget(&db, User("client-1"), &api::Budget { category: "groceries".into(), monthly_cents: 10000 })
+            .await
+            .unwrap();
+        async fn criar(db: &tokio_postgres::Client, user: &'static str, me: u8, desc: &str, valor: i64, dia: &str) -> Result<tools::Outcome, String> {
+            tools::run(db, User(user), me, "criar_lancamento", &json!({
+                "descricao": desc, "valor_centavos": valor, "data": dia, "tipo": "expense", "categoria": "groceries",
+            }))
+            .await
+        }
+        // Dentro do limite: sem aviso.
+        let resultado = criar(&db, "client-1", 0, "Feira", 8000, "2026-11-10").await.unwrap();
+        assert!(resultado.result.get("orcamento").is_none(), "{}", resultado.result);
+        let feira = resultado.result["criado"]["id"].as_str().unwrap().to_owned();
+        // Estourou: o resultado traz o total do DOMICÍLIO contra o limite.
+        let resultado = criar(&db, "client-1", 0, "Mercado", 5000, "2026-11-12").await.unwrap();
+        assert_eq!(
+            resultado.result["orcamento"],
+            json!({"categoria": "groceries", "gasto_casal_cents": 13000, "limite_cents": 10000})
+        );
+        // O gasto do parceiro também conta no total do casal.
+        let resultado = criar(&db, "client-2", 1, "Padaria", 3000, "2026-11-13").await.unwrap();
+        assert_eq!(resultado.result["orcamento"]["gasto_casal_cents"], json!(16000));
+        let padaria = resultado.result["criado"]["id"].as_str().unwrap().to_owned();
+        // Editar para um valor que mantém o estouro segue avisando.
+        let resultado = tools::run(&db, User("client-2"), 1, "editar_lancamento", &json!({"id": padaria, "valor_centavos": 6000}))
+            .await
+            .unwrap();
+        assert_eq!(resultado.result["orcamento"]["gasto_casal_cents"], json!(19000));
+        // Editar a Feira sem tirar o total do limite segue avisando (13.000 + 6.000 > 10.000).
+        let resultado = tools::run(&db, User("client-1"), 0, "editar_lancamento", &json!({"id": feira, "valor_centavos": 8000}))
+            .await
+            .unwrap();
+        assert!(resultado.result.get("orcamento").is_some(), "{}", resultado.result);
+
+        // fechar_mes: semeia o mês anterior e roda sem mês explícito (mês atual).
+        let (mes, anterior): (String, String) = {
+            let row = db
+                .query_one(
+                    "SELECT to_char(date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM'),
+                            to_char((date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo') - interval '1 month'), 'YYYY-MM')",
+                    &[],
+                )
+                .await
+                .unwrap();
+            (row.get(0), row.get(1))
+        };
+        db.batch_execute(&format!(
+            "INSERT INTO entries(household_id, owner_id, description, amount_cents, entry_date, kind, category_key, paid, recurring)
+             SELECT household_id, id, v.d, v.v, ('{anterior}-' || v.dd)::date, 'expense', 'housing', true, true
+             FROM members, (VALUES ('Internet', 9900, '08'), ('Luz', 19000, '05')) AS v(d, v, dd)
+             WHERE client_user_id = 'client-1'"
+        ))
+        .await
+        .unwrap();
+        let resultado = tools::run(&db, User("client-1"), 0, "fechar_mes", &json!({})).await.unwrap();
+        let copiados = resultado.result["copiados"].as_array().unwrap();
+        assert_eq!(copiados.len(), 2, "{}", resultado.result);
+        assert!(copiados.iter().all(|c| c["data"].as_str().unwrap().starts_with(&mes)), "as cópias caem no mês atual");
+        assert!(copiados.iter().all(|c| c["pago"] == json!(false)));
+        assert_eq!(resultado.ops.len(), 3, "um selo por cópia + o resumo");
+        assert!(resultado.ops.iter().take(2).all(|op| op.tool == "copiar_mes_anterior"));
+        assert_eq!(resultado.ops[2].tool, "fechar_mes");
+        assert!(resultado.ops[2].label.contains("fechou o mês: 2 lançamento(s) copiado(s)"), "{}", resultado.ops[2].label);
+        // O relatório completo está no resultado da ferramenta, com as chaves da rotina.
+        for chave in ["copiados", "faturas", "acerto_sugerido", "alertas_preco", "fechamentos"] {
+            assert!(resultado.result.get(chave).is_some(), "faltou {chave}");
+        }
+        // Segunda rodada: nada a copiar, só o resumo.
+        let resultado = tools::run(&db, User("client-1"), 0, "fechar_mes", &json!({})).await.unwrap();
+        assert_eq!(resultado.ops.len(), 1);
+        assert!(resultado.ops[0].label.contains("0 lançamento(s) copiado(s)"), "{}", resultado.ops[0].label);
+        // As cópias estão no estado do domicílio, não pagas, no mês atual (a auditoria fica
+        // por conta de quem chama: a conversa e a rota registram; `tools::run` direto não).
+        let copiadas: i64 = db
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM entries e
+                     WHERE e.household_id = (SELECT household_id FROM members WHERE client_user_id = 'client-1')
+                         AND to_char(e.entry_date, 'YYYY-MM') = $1
+                         AND e.paid = false AND e.description IN ('Internet', 'Luz')"
+                ),
+                &[&mes],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(copiadas, 2);
     })
     .await;
 }

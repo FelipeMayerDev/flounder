@@ -93,17 +93,17 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 /// "R$ 5.304,28" — inteiro bold grande, centavos menores (como no mockup).
+/// Os dígitos vêm do núcleo (`model::split_money`): milhar com "." e centavos com ",",
+/// o mesmo formato do desktop — inclusive o menos tipográfico dos negativos.
 pub fn money(ui: &mut Ui, cents: i64, size: f32, cor: Color32) -> Response {
-    let neg = cents < 0;
-    let valor = crate::app::fmt_money(cents.abs());
-    let (inteiro, centavos) = valor.split_once(',').unwrap_or((valor.as_str(), "00"));
+    let (inteiro, centavos) = flounder::model::split_money(cents);
     let mut job = egui::text::LayoutJob::default();
     let f = |font, color, valign| egui::TextFormat { font_id: font, color, valign, ..Default::default() };
-    if neg {
-        job.append("− ", 0.0, f(w::semibold(size * 0.8), cor, egui::Align::BOTTOM));
+    if cents < 0 {
+        job.append("−", 0.0, f(w::semibold(size * 0.8), cor, egui::Align::BOTTOM));
     }
     job.append("R$ ", 0.0, f(w::semibold(size * 0.55), cor, egui::Align::BOTTOM));
-    job.append(inteiro, 0.0, f(w::bold(size), cor, egui::Align::BOTTOM));
+    job.append(&inteiro, 0.0, f(w::bold(size), cor, egui::Align::BOTTOM));
     job.append(&format!(",{centavos}"), 1.0, f(w::semibold(size * 0.62), cor, egui::Align::BOTTOM));
     ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
     ui.response()

@@ -269,11 +269,27 @@ pub struct App {
     pub sel_day: u32,
     pub form: Option<Form>,
     pub invoice: Option<usize>,
+    /// Rascunho do dia de fechamento no modal do cartão conectado.
+    pub closing_draft: Option<String>,
     /// Contas marcadas/desmarcadas neste mês: ficam no lugar nas listas "a pagar" até trocar de mês,
     /// para a linha não sumir debaixo do cursor.
     pub touched: Vec<BillRef>,
     /// Agente flutuante: bolha, análises e conversa com o GLM.
     pub agent: crate::assistant::Agent,
+    /// Orçamentos mensais por categoria (do estado do backend; alimentam o painel e Ajustes).
+    pub budgets: Vec<crate::api::Budget>,
+    /// Ações do assistente (auditoria em Ajustes); `None` = ainda não buscadas nesta sessão.
+    pub assistant_actions: Option<Vec<crate::api::ActionRecord>>,
+    /// Falha ao carregar as ações do assistente.
+    pub actions_error: Option<String>,
+    /// Ações já pedidas uma vez nesta sessão quando a seção de Ajustes apareceu.
+    pub actions_requested: bool,
+    /// Relatório da rotina do mês (`Cmd::Routine`); `None` enquanto não há resposta.
+    pub routine: Option<Result<serde_json::Value, String>>,
+    /// `POST /api/routine/month` em andamento.
+    pub routine_waiting: bool,
+    /// Histórico da conversa pedido uma vez por abertura da janela do agente.
+    pub history_requested: bool,
 }
 
 impl App {
@@ -292,15 +308,23 @@ impl App {
             flow: Default::default(),
             data: Data::demo(),
             month: Month::of(today()),
-            mode: Mode::Couple,
+            mode: Mode::Individual,
             screen: Screen::Home,
             theme: Theme::Light,
             dashboard_layout: DashboardLayout::default(),
             sel_day: today().d,
             form: None,
             invoice: None,
+            closing_draft: None,
             touched: Vec::new(),
             agent: Default::default(),
+            budgets: Vec::new(),
+            assistant_actions: None,
+            actions_error: None,
+            actions_requested: false,
+            routine: None,
+            routine_waiting: false,
+            history_requested: false,
         }
     }
 
@@ -381,6 +405,18 @@ impl App {
                 }
                 Msg::Reports(reports) => self.agent.on_reports(reports),
                 Msg::Chat(result) => self.agent.on_chat(result),
+                Msg::History(result) => self.agent.on_history(result),
+                Msg::Actions(result) => match result {
+                    Ok(log) => {
+                        self.assistant_actions = Some(log.actions);
+                        self.actions_error = None;
+                    }
+                    Err(_) => self.actions_error = Some("Não foi possível carregar as ações do assistente.".into()),
+                },
+                Msg::Routine(result) => {
+                    self.routine_waiting = false;
+                    self.routine = Some(result);
+                }
             }
         }
         if latest.is_some() && r.me.is_some() && std::mem::take(&mut self.auto_sync) && w.tx.send(crate::backend::Cmd::Sync).is_ok() {
@@ -542,6 +578,7 @@ impl App {
         }))).collect();
         self.connected_cards = Some(state.cards);
         self.accounts = state.accounts;
+        self.budgets = state.budgets;
         self.data.shared_split_off = state.shared_split_off;
         if let Some(r) = &mut self.remote {
             r.members = state.members;
@@ -561,6 +598,14 @@ impl App {
         // Ids locais mudam com a nova thread.
         self.form = None;
         self.touched.clear();
+        // O histórico, as ações e os orçamentos são da pessoa que estava conectada.
+        self.budgets.clear();
+        self.assistant_actions = None;
+        self.actions_error = None;
+        self.actions_requested = false;
+        self.routine = None;
+        self.routine_waiting = false;
+        self.history_requested = false;
     }
 
     /// Lembra quem usa este computador (`client-N`) e passa a usar o token dessa pessoa.
@@ -594,6 +639,21 @@ impl App {
         if let Some(w) = self.remote.as_mut().and_then(|r| r.worker.as_mut()) {
             w.save(cmd);
         }
+    }
+
+    /// Consulta ao worker (histórico, ações, rotina): não conta como gravação, para não
+    /// segurar a aplicação do estado até uma resposta que nunca manda `Msg::Done`.
+    pub(crate) fn ask(&mut self, cmd: crate::backend::Cmd) {
+        if let Some(w) = self.remote.as_mut().and_then(|r| r.worker.as_mut()) {
+            w.ask(cmd);
+        }
+    }
+
+    /// Roda a rotina do mês ("" = mês atual): limpa o relatório anterior e mostra "gerando…".
+    pub fn run_routine(&mut self, month: String) {
+        self.routine = None;
+        self.routine_waiting = true;
+        self.ask(crate::backend::Cmd::Routine(month));
     }
 
     pub(crate) fn push(&mut self, id: u32) {
@@ -1094,6 +1154,8 @@ impl App {
         };
         let colors = w::palette(ui.ctx());
         let mut close = false;
+        let mut set = None;
+        let mut clear = false;
         let response = egui::Modal::new(egui::Id::new("connected-card"))
             .frame(egui::Frame::new().fill(colors.card).corner_radius(16).inner_margin(24))
             .show(ui.ctx(), |ui| {
@@ -1106,6 +1168,29 @@ impl App {
                     ui.label(format!("{label}: {}", crate::dashboard::connected_money(value, &card.currency)));
                 }
                 ui.add_space(w::GROUP_GAP);
+                w::title(ui, "Fechamento");
+                w::caption(ui, match card.closing_day {
+                    Some(d) => format!("Dia {d} — compras feitas nele ou depois caem na fatura seguinte."),
+                    None => "Não informado — compras caem no mês civil. A Pluggy manda o dia quando o banco informa.".into(),
+                });
+                ui.horizontal(|ui| {
+                    let draft = self.closing_draft.get_or_insert_with(String::new);
+                    ui.add(w::text_input(draft, "dia (1–31)"));
+                    if ui.button("Aplicar").clicked() {
+                        set = draft.trim().parse::<u32>().ok().filter(|d| (1..=31).contains(d));
+                    }
+                    if card.closing_day.is_some() && ui.button("Remover ajuste").clicked() {
+                        clear = true;
+                    }
+                });
+                let invalid = self.closing_draft.as_deref().is_some_and(|s| {
+                    let s = s.trim();
+                    !s.is_empty() && s.parse::<u32>().map_or(true, |d| !(1..=31).contains(&d))
+                });
+                if invalid {
+                    w::caption(ui, "Use um dia de 1 a 31.");
+                }
+                ui.add_space(w::GROUP_GAP);
                 w::title(ui, "Faturas");
                 if card.bills.is_empty() {
                     w::caption(ui, if card.bills_available { "Nenhuma fatura recebida." } else { "Faturas não disponibilizadas pela instituição." });
@@ -1116,9 +1201,37 @@ impl App {
                     }
                 });
                 ui.add_space(w::GROUP_GAP);
+                w::title(ui, "Próximas faturas");
+                // Totais projetados dos três vencimentos seguintes ao mês visto; meses sem
+                // compras fechadas ficam de fora.
+                let next: Vec<_> = self
+                    .data
+                    .next_invoices(&card.id, &card.bills, card.closing_day, card.due_day, self.month, 3)
+                    .into_iter()
+                    .filter(|(_, total)| *total != 0)
+                    .collect();
+                if next.is_empty() {
+                    w::caption(ui, "Sem compras futuras fechadas.");
+                }
+                for (month, total) in next {
+                    ui.label(format!("{} · {}", month.short(), money(total)));
+                }
+                ui.add_space(w::GROUP_GAP);
                 if ui.button("Fechar").clicked() { close = true; }
             });
-        if close || response.should_close() { self.connected_invoice = None; }
+        // Otimista: a interface já mostra o dia novo; o backend confirma (ou recarrega com o aviso de falha).
+        let day = if clear { None } else { set };
+        if clear || set.is_some() {
+            if let Some(c) = self.connected_cards.as_mut().and_then(|cs| cs.iter_mut().find(|c| c.id == card.id)) {
+                c.closing_day = day;
+            }
+            self.closing_draft = None;
+            self.send(crate::backend::Cmd::ClosingDay { card: card.id.clone(), day });
+        }
+        if close || response.should_close() {
+            self.connected_invoice = None;
+            self.closing_draft = None;
+        }
     }
 
     fn invoice_modal(&mut self, ui: &mut Ui) {

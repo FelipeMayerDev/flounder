@@ -32,7 +32,7 @@ fn connected_card() -> flounder::connected::ConnectedCard {
 fn connected_app() -> App {
     let mut app = App::new();
     app.connected_cards = Some(vec![connected_card()]);
-    app.dashboard_layout.order = [5, 0, 1, 2, 3, 4, 6];
+    app.dashboard_layout.order = [5, 0, 1, 2, 3, 4, 6, 7, 8];
     app
 }
 
@@ -46,6 +46,7 @@ fn individual_mode_shows_only_my_connected_cards() {
         let mut app = connected_app();
         app.connected_cards.as_mut().unwrap().push(other.clone());
         app.data.me = me;
+        app.mode = Mode::Couple;
         let mut hs = harness(app, 1440.0, 1100.0, 1.0);
         assert!(hs.query_by_label_contains("Ver cartão Nubank").is_some());
         assert!(hs.query_by_label_contains("Ver cartão Inter").is_some());
@@ -369,8 +370,12 @@ fn agent_screenshots() {
         ],
     });
     hs.state_mut().agent.chat = vec![
-        flounder::api::ChatMsg { role: "user".into(), content: "Como está meu mês?".into() },
-        flounder::api::ChatMsg { role: "assistant".into(), content: "Nadando bem! As compras de cartão somam R$ 1.870 e a fatura fecha em R$ 2.558 — nada fora d'água. 🐠".into() },
+        flounder::api::ChatMsg { role: "user".into(), content: "Como está meu mês?".into(), ops: Vec::new() },
+        flounder::api::ChatMsg {
+            role: "assistant".into(),
+            content: "Nadando bem! As compras de cartão somam R$ 1.870 e a fatura fecha em R$ 2.558 — nada fora d'água. 🐠".into(),
+            ops: vec![flounder::api::Op { tool: "buscar_lancamentos".into(), label: "buscou lançamentos (12 encontrados)".into() }],
+        },
     ];
     hs.run();
     hs.render().unwrap().save(dir.join("agente-janela.png")).unwrap();
@@ -645,8 +650,8 @@ fn dashboard_drag_screenshots() {
 #[test]
 fn compact_cards_allow_three_columns_without_a_blank_header_row() {
     let mut app = App::new();
-    app.dashboard_layout.order = [0, 2, 3, 4, 1, 6, 5];
-    app.dashboard_layout.spans = [4; 7];
+    app.dashboard_layout.order = [0, 2, 3, 4, 1, 6, 5, 7, 8];
+    app.dashboard_layout.spans = [4; 9];
     let hs = harness(app, 1256.0, 1200.0, 1.0);
     let centers: Vec<_> = ["Saldo previsto", "Calendário de vencimentos", "Evolução do saldo previsto"]
         .iter().map(|label| hs.get_by_label(&format!("Mover {label}")).rect().center()).collect();
@@ -664,8 +669,8 @@ fn compact_cards_allow_three_columns_without_a_blank_header_row() {
 fn three_column_screenshots() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screenshots");
     let mut app = App::new();
-    app.dashboard_layout.order = [0, 2, 3, 4, 1, 6, 5];
-    app.dashboard_layout.spans = [4; 7];
+    app.dashboard_layout.order = [0, 2, 3, 4, 1, 6, 5, 7, 8];
+    app.dashboard_layout.spans = [4; 9];
     let mut hs = harness(app, 1256.0, 1400.0, 1.0);
     hs.render().unwrap().save(dir.join("painel-tres-colunas.png")).unwrap();
 }
@@ -766,6 +771,7 @@ fn cards_screen_tracks_installments_and_future_commitments() {
     use flounder::app::Screen;
     let (state, entries) = rich_state();
     let (mut hs, _replies, _commands) = signed_in(state, entries, 1440.0, 2400.0);
+    hs.state_mut().mode = Mode::Couple;
     hs.state_mut().screen = Screen::Cards;
     hs.run();
     assert!(hs.query_by_label("Parcelas em andamento").is_some());
@@ -850,6 +856,7 @@ fn cash_flow_lists_filters_and_copies_previous_month() {
     use flounder::app::Screen;
     let (state, entries) = rich_state();
     let (mut hs, _replies, commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().mode = Mode::Couple;
     hs.state_mut().screen = Screen::CashFlow;
     hs.run();
     assert!(hs.query_by_label("Lançamentos de novembro").is_some());
@@ -984,6 +991,8 @@ fn house_shows_cumulative_balance_and_registers_and_deletes_settlements() {
     use flounder::app::Screen;
     let (state, entries) = household_state();
     let (mut hs, replies, commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().mode = Mode::Couple;
+    hs.run();
     let _ = commands.try_iter().count();
     let balance = hs.state().data.house_balance(nov());
     assert!(balance > 0, "no demo, Ana paga mais da casa");
@@ -1102,6 +1111,7 @@ fn settings_rename_members_and_choose_connection_bank() {
     let _ = commands.try_iter().count();
     hs.state_mut().screen = Screen::Settings;
     hs.run();
+    let _ = commands.try_iter().count();
     assert!(hs.query_by_label("Ana · atualizada hoje às 14:30").is_some());
     assert!(hs.query_by_label("Bruno · atualizada há 3 dias (07/11/2026 às 09:05)").is_some());
     assert!(hs.query_by_label_contains("meu.pluggy.ai").is_some());
@@ -1304,6 +1314,7 @@ fn settings_show_the_income_split_and_can_turn_shared_expenses_off() {
     use flounder::app::Screen;
     let (state, entries) = rich_state();
     let (mut hs, _replies, commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().mode = Mode::Couple;
     hs.state_mut().screen = Screen::Settings;
     hs.run();
     // Renda registrada: Ana 57% e Bruno 43% (salários + PIX extra de Ana).
@@ -1330,6 +1341,7 @@ fn house_screen_splits_shared_bills_by_income() {
     use flounder::app::Screen;
     let (state, entries) = rich_state();
     let (mut hs, _replies, _commands) = signed_in(state, entries, 1440.0, 1600.0);
+    hs.state_mut().mode = Mode::Couple;
     hs.state_mut().screen = Screen::House;
     hs.run();
     assert!(hs.query_by_label_contains("Rateio pela renda: Ana 57% · Bruno 43%.").is_some());
@@ -1390,3 +1402,204 @@ fn access_card_shows_the_fixed_codes_to_send() {
     assert!(hs.query_by_label_contains("Copiar código").is_some());
     assert!(hs.query_by_label_contains("sem código no servidor").is_some(), "código ausente explica como definir");
 }
+
+// ───────────────────────── Orçamentos, painel novo e rotina ─────────────────────────
+
+#[test]
+fn budget_and_price_cards_show_only_when_there_is_data() {
+    // Demonstração: sem orçamentos e sem alertas, os cards condicionais não entram no painel.
+    let hs = harness(App::new(), 1440.0, 1600.0, 1.0);
+    assert!(hs.query_by_label("Orçamento do mês").is_none());
+    assert!(hs.query_by_label("Mudanças de preço").is_none());
+
+    // Com orçamentos: consumo por categoria contra o teto.
+    let mut app = App::new();
+    app.budgets = vec![
+        flounder::api::Budget { category: "groceries".into(), monthly_cents: 100_000 },
+        flounder::api::Budget { category: "transport".into(), monthly_cents: 250_000 },
+    ];
+    let hs = harness(app, 1440.0, 1600.0, 1.0);
+    assert!(hs.query_by_label("Orçamento do mês").is_some());
+    assert!(hs.query_by_label_contains("de R$ 1.000,00 ·").is_some(), "linha com teto e consumo");
+
+    // Conta fixa que escapou da média: card de mudanças de preço com o % ao lado.
+    let mut app = App::new();
+    let mut d = Data::empty();
+    d.names = ["Ana".into(), "Bruno".into()];
+    let nov = nov();
+    for (k, v) in [(-3, 10_000), (-2, 10_000), (-1, 10_000), (0, 20_000)] {
+        d.upsert(Entry {
+            id: 0, desc: "Luz".into(), amount: v, date: nov.add(k).day(15), kind: Kind::Expense,
+            category: Category::Utilities, owner: Person::A, shared: false, card: None,
+            connected: None, imported: false, paid: true, recurring: true,
+        });
+    }
+    app.data = d;
+    let hs = harness(app, 1440.0, 1600.0, 1.0);
+    assert!(hs.query_by_label("Mudanças de preço").is_some());
+    assert!(hs.query_by_label_contains("Luz: R$ 200,00 (média R$ 133,33)").is_some());
+    assert!(hs.query_by_label_contains("+50%").is_some());
+}
+
+#[test]
+fn connected_card_modal_projects_next_invoices_and_warns_about_closing() {
+    use flounder::app::Screen;
+    let (state, entries) = rich_state();
+    let mut entries = entries;
+    entries.push(Entry {
+        id: 999, desc: "Compra de dezembro".into(), amount: 50_000, date: nov().day(25),
+        kind: Kind::Expense, category: Category::Shopping, owner: Person::A, shared: false,
+        card: None, connected: Some("card-ana".into()), imported: true, paid: true, recurring: false,
+    });
+    let (mut hs, _replies, _commands) = signed_in(state, entries, 1440.0, 2000.0);
+    hs.state_mut().mode = Mode::Couple;
+    // Sem fechamento informado: não há base para projetar.
+    hs.state_mut().connected_invoice = Some("card-ana".into());
+    hs.run();
+    assert!(hs.query_by_label("Sem compras futuras fechadas.").is_some());
+    hs.get_by_label("Fechar").click();
+    hs.run();
+    assert!(hs.state().connected_invoice.is_none());
+    // Fechamento dia 20 com vencimento 25: a compra de 25/11 fecha a fatura de dezembro.
+    hs.state_mut().connected_cards.as_mut().unwrap().iter_mut().for_each(|c| {
+        c.closing_day = Some(20);
+        c.due_day = Some(25);
+    });
+    hs.state_mut().connected_invoice = Some("card-ana".into());
+    hs.run();
+    assert!(hs.query_by_label("Próximas faturas").is_some());
+    assert!(hs.query_by_label_contains("Dez 26 · R$").is_some());
+    assert!(hs.query_by_label_contains("Jan 27 · R$").is_none(), "meses sem compras fechadas ficam de fora");
+    hs.get_by_label("Fechar").click();
+    hs.run();
+
+    // Fechamento iminente: chip âmbar na face do cartão do painel e na seção de compras.
+    hs.state_mut().connected_cards.as_mut().unwrap().iter_mut().for_each(|c| c.closing_day = Some(today().d));
+    hs.run();
+    assert!(hs.query_all_by_label_contains("Fecha hoje — compras de hoje já vão para a próxima fatura.").count() >= 2, "painel: um aviso por cartão");
+    hs.state_mut().screen = Screen::Cards;
+    hs.run();
+    assert!(hs.query_all_by_label_contains("Fecha hoje — compras de hoje já vão para a próxima fatura.").count() >= 2, "tela de cartões");
+}
+
+#[test]
+fn assistant_chat_requests_history_on_open_and_clears_the_conversation() {
+    let (state, entries) = rich_state();
+    let (mut hs, replies, commands) = signed_in(state, entries, 1440.0, 900.0);
+    hs.state_mut().agent.reports = Some(flounder::api::AssistantReports { enabled: true, busy: false, reports: vec![] });
+    hs.state_mut().agent.open = true;
+    hs.run();
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::History)), "abertura com conversa vazia pede o histórico");
+    let _ = commands.try_iter().count();
+
+    // Histórico chega e enche a conversa.
+    let history = |contents: &[&str]| flounder::api::ChatHistory {
+        messages: contents.iter().map(|c| flounder::api::ChatMsg {
+            role: (if c.starts_with("Q:") { "user" } else { "assistant" }).into(),
+            content: c.trim_start_matches("Q:").into(), ops: vec![],
+        }).collect(),
+    };
+    replies.send(Msg::History(Ok(history(&["Q:Como foi meu mês?", "De boa. 🐠"])))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("De boa. 🐠").is_some());
+    // Histórico que chega com a conversa já preenchida não sobrescreve nada.
+    replies.send(Msg::History(Ok(history(&["Q:antiga"])))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("De boa. 🐠").is_some());
+    // Reabrir com conversa preenchida não pede o histórico de novo.
+    hs.state_mut().agent.open = false;
+    hs.run();
+    hs.state_mut().agent.open = true;
+    hs.run();
+    assert!(!commands.try_iter().any(|c| matches!(c, Cmd::History)));
+
+    // "Limpar conversa": zera a conversa local e apaga no backend, num clique.
+    hs.get_by_label("Limpar conversa").click();
+    hs.run();
+    assert!(hs.state().agent.chat.is_empty());
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::ClearHistory)));
+    // Reaberta com a conversa vazia: pede o histórico outra vez.
+    hs.state_mut().agent.open = false;
+    hs.run();
+    hs.state_mut().agent.open = true;
+    hs.run();
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::History)));
+}
+
+#[test]
+fn settings_show_budgets_assistant_actions_and_month_routine() {
+    use flounder::app::Screen;
+    let (mut state, entries) = rich_state();
+    state.budgets = vec![flounder::api::Budget { category: "groceries".into(), monthly_cents: 60_000 }];
+    let (mut hs, replies, commands) = signed_in(state, entries, 1440.0, 2400.0);
+    hs.state_mut().mode = Mode::Couple;
+    let _ = commands.try_iter().count();
+    hs.state_mut().screen = Screen::Settings;
+    hs.run();
+    // A seção de ações busca uma vez ao aparecer; drena aqui para não poluir os asserts seguintes.
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::AssistantActions)));
+
+    // Orçamentos: o valor salvo preenche a linha e o consumo do mês aparece ao lado.
+    assert!(hs.query_by_label("Orçamentos").is_some());
+    let spent = hs.state().data.summary(nov(), Mode::Couple).by_category.iter()
+        .find(|(c, _)| c.key() == "groceries").map_or(0, |(_, v)| *v);
+    let pct = (spent as f32 / 60_000.0 * 100.0).round() as i32;
+    assert!(hs.query_by_label_contains(&format!("{} · {pct}%", money(spent))).is_some(), "gasto e consumo ao lado do orçamento");
+    // Editar a linha de Moradia (primeira) e salvar manda o comando e aplica na hora.
+    let mut drafts = vec![String::new(); 13];
+    drafts[0] = "1.500,00".into();
+    hs.state_mut().extra.budget_drafts = Some(drafts);
+    hs.run();
+    hs.get_all_by_label("Salvar").next().unwrap().click();
+    hs.run();
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::Budget(b) if b.category == "housing" && b.monthly_cents == 150_000)));
+    assert!(hs.state().budgets.iter().any(|b| b.category == "housing"), "atualização otimista do card");
+
+    // Ações do assistente: a resposta vira lista com hora local.
+    assert!(hs.query_by_label_contains("Buscando as ações do assistente").is_some());
+    replies.send(Msg::Actions(Ok(flounder::api::ActionLog { actions: vec![
+        flounder::api::ActionRecord { tool: "criar_lancamento".into(), label: "Criou \"Mercado\"".into(), at: "2026-11-12T17:32:00Z".into() },
+    ] }))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("Criou \"Mercado\"").is_some());
+    assert!(hs.query_by_label_contains("12/11 14:32").is_some(), "data/hora de São Paulo");
+    assert!(hs.query_by_label_contains("criar_lancamento").is_some());
+    // Falha: aviso na própria seção.
+    replies.send(Msg::Actions(Err("O backend respondeu com erro 500.".into()))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label("Não foi possível carregar as ações do assistente.").is_some());
+    // Sem ações: estado vazio.
+    replies.send(Msg::Actions(Ok(flounder::api::ActionLog { actions: vec![] }))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label("O assistente ainda não agiu.").is_some());
+
+    // Rotina do mês: o pedido mostra "gerando"; o relatório renderiza com tolerância ao JSON.
+    let _ = commands.try_iter().count();
+    hs.get_by_label_contains("Fechar o mês").scroll_to_me();
+    hs.run();
+    hs.get_by_label_contains("Fechar o mês").click();
+    hs.run();
+    assert!(commands.try_iter().any(|c| matches!(c, Cmd::Routine(m) if m.is_empty())));
+    assert!(hs.query_by_label_contains("Gerando o relatório do mês").is_some());
+    let report = serde_json::json!({
+        "copiados": [ {"descricao": "Aluguel", "valor_centavos": 1_800_000, "tipo": "expense"}, {"descricao": "Internet", "valor_centavos": 9_990, "tipo": "expense"} ],
+        "faturas": [ {"label": "Fatura Nubank", "due": "2026-11-25", "total_cents": 231_040, "paid": false} ],
+        "acerto_sugerido": {"valor_cents": 50_000, "de": 1},
+        "alertas_preco": [ {"desc": "Luz", "recent_cents": 19_000, "average_cents": 13_333} ],
+        "fechamentos": [ {"nome": "Nubank", "dia_fechamento": 20, "dias": 3} ]
+    });
+    replies.send(Msg::Routine(Ok(report))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("2 lançamentos copiados").is_some());
+    assert!(hs.query_by_label_contains("Aluguel").is_some());
+    assert!(hs.query_by_label_contains("Fatura Nubank · vence 25/11").is_some());
+    assert!(hs.query_by_label_contains("Acerto sugerido: R$ 500,00 de Bruno para Ana").is_some());
+    assert!(hs.query_by_label_contains("Luz: R$ 190,00 (média R$ 133,33)").is_some());
+    assert!(hs.query_by_label_contains("Nubank fecha em 3 dias").is_some());
+    // Falha: mensagem no lugar do relatório e o botão volta a funcionar.
+    replies.send(Msg::Routine(Err("O backend respondeu com erro 500.".into()))).unwrap();
+    hs.run();
+    assert!(hs.query_by_label_contains("O backend respondeu com erro 500.").is_some());
+    assert!(hs.query_by_label_contains("Fechar o mês").is_some());
+}
+

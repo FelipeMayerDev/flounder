@@ -3,7 +3,7 @@ use crate::connected::{ConnectedBill, ConnectedCard, cents, identify, iso_date};
 use tokio::sync::{MappedMutexGuard, MutexGuard};
 use tokio_postgres::{Client, NoTls, Row};
 
-const MIGRATIONS: [(i32, &str); 6] = [
+const MIGRATIONS: [(i32, &str); 8] = [
     (1, include_str!("../migrations/001_initial.sql")),
     (
         2,
@@ -16,9 +16,17 @@ const MIGRATIONS: [(i32, &str); 6] = [
         6,
         include_str!("../migrations/006_assistant_and_split.sql"),
     ),
+    (
+        7,
+        include_str!("../migrations/007_card_closing_day.sql"),
+    ),
+    (
+        8,
+        include_str!("../migrations/008_budgets_chat_actions.sql"),
+    ),
 ];
 pub(super) const HOUSEHOLD: &str = "(SELECT household_id FROM members WHERE client_user_id = $1)";
-const ENTRY: &str = "e.id::text, e.description, e.amount_cents, to_char(e.entry_date, 'YYYY-MM-DD'), \
+pub(super) const ENTRY: &str = "e.id::text, e.description, e.amount_cents, to_char(e.entry_date, 'YYYY-MM-DD'), \
     e.kind, e.category_key, e.shared, m.position, e.paid, \
     (SELECT a.external_id FROM cards c JOIN bank_accounts a ON a.id = c.account_id WHERE c.id = e.card_id), \
     EXISTS (SELECT 1 FROM bank_transactions t WHERE t.entry_id = e.id), \
@@ -318,20 +326,25 @@ impl Backend {
 
             let mut card_id = None;
             if let Some(card) = &f.card {
+                // Dia do mês de fechamento/vencimento da Pluggy; `manual_closing_day` (ajuste do
+                // usuário) fica de fora do upsert e sobrevive às reimportações.
+                let (closing_day, due_day) = (card.closing_day.map(|d| d as i16), card.due_day.map(|d| d as i16));
                 let id: String = tx
                     .query_one(
                         "INSERT INTO cards(household_id, owner_id, account_id, name, institution_key, institution_name, color_hex,
-                             last_four, brand, currency, credit_limit_cents, available_limit_cents, due_date, bills_available)
-                         VALUES ($1::text::uuid, $2::text::uuid, $3::text::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::date, $14)
+                             last_four, brand, currency, credit_limit_cents, available_limit_cents, due_date, closing_day, due_day, bills_available)
+                         VALUES ($1::text::uuid, $2::text::uuid, $3::text::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::date, $14, $15, $16)
                          ON CONFLICT (account_id) DO UPDATE SET name = EXCLUDED.name, institution_key = EXCLUDED.institution_key,
                              institution_name = EXCLUDED.institution_name, color_hex = EXCLUDED.color_hex,
                              last_four = EXCLUDED.last_four, brand = EXCLUDED.brand, currency = EXCLUDED.currency,
                              credit_limit_cents = EXCLUDED.credit_limit_cents, available_limit_cents = EXCLUDED.available_limit_cents,
-                             due_date = EXCLUDED.due_date, bills_available = EXCLUDED.bills_available
+                             due_date = EXCLUDED.due_date, closing_day = EXCLUDED.closing_day, due_day = EXCLUDED.due_day,
+                             bills_available = EXCLUDED.bills_available
                          RETURNING id::text",
                         &[
                             &home, &owner, &account, &card.name, &key, &institution_name, &color_hex, &card.last_four,
-                            &card.brand, &currency, &card.limit, &card.available, &card.due, &card.bills_available,
+                            &card.brand, &currency, &card.limit, &card.available, &card.due, &closing_day, &due_day,
+                            &card.bills_available,
                         ],
                     )
                     .await?
@@ -351,12 +364,12 @@ impl Backend {
                     tx.execute(
                         // Fatura nova de mês anterior (cartão recém-conectado) já foi paga fora do app;
                         // depois disso, "paga" é do usuário e a reimportação não mexe.
-                        "INSERT INTO card_invoices(household_id, card_id, due_date, currency, total_cents, source, external_id, paid)
-                         VALUES ($1::text::uuid, $2::text::uuid, $3::text::date, $4, $5, 'pluggy', $6,
+                        "INSERT INTO card_invoices(household_id, card_id, due_date, closing_date, currency, total_cents, source, external_id, paid)
+                         VALUES ($1::text::uuid, $2::text::uuid, $3::text::date, $4::text::date, $5, $6, 'pluggy', $7,
                              $3::text::date < date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo')::date)
                          ON CONFLICT (card_id, due_date, currency) DO UPDATE SET total_cents = EXCLUDED.total_cents,
-                             source = 'pluggy', external_id = EXCLUDED.external_id",
-                        &[&home, &id, &bill.due, &currency, &bill.total, &bill_id],
+                             source = 'pluggy', external_id = EXCLUDED.external_id, closing_date = EXCLUDED.closing_date",
+                        &[&home, &id, &bill.due, &bill.closing, &currency, &bill.total, &bill_id],
                     )
                     .await?;
                     dues.push(bill.due.as_str());
@@ -640,7 +653,7 @@ fn classify(account_kind: &str, t: &Value, amount: i64) -> Option<(&'static str,
 }
 
 
-fn entry(row: &Row) -> api::Entry {
+pub(super) fn entry(row: &Row) -> api::Entry {
     api::Entry {
         id: row.get(0),
         description: row.get(1),
@@ -704,18 +717,28 @@ pub(super) async fn state(
         });
     let bills = db
         .query(
-            &format!("SELECT card_id::text, to_char(due_date, 'YYYY-MM-DD'), total_cents, currency, paid FROM card_invoices
+            &format!("SELECT card_id::text, to_char(due_date, 'YYYY-MM-DD'), total_cents, currency, paid,
+                    to_char(closing_date, 'YYYY-MM-DD') FROM card_invoices
                  WHERE household_id = {HOUSEHOLD} AND source = 'pluggy' ORDER BY due_date, currency"),
             &[&user.0],
         )
         .await?;
     // Banco: o escolhido na conexão (ci) tem precedência sobre o detectado na importação (i/nome próprio).
+    // Dia de fechamento: manual do usuário vence o da Pluggy; sem os dois, cai no dia da fatura
+    // mais recente. Vencimento: coluna nova, depois `cards.due_date`, depois a fatura mais recente.
     let cards = db
         .query(
             &format!("SELECT c.id::text, a.external_id, cn.external_id,
                     COALESCE(ci.name, i.name, c.institution_name, 'Cartão conectado'),
                     COALESCE(ci.color_hex, i.color_hex, c.color_hex, '304058'),
                     c.name, c.last_four, c.brand, c.currency, a.balance_cents, c.credit_limit_cents, c.available_limit_cents,
+                    COALESCE(c.manual_closing_day, c.closing_day,
+                        (SELECT EXTRACT(DAY FROM inv.closing_date)::smallint FROM card_invoices inv
+                         WHERE inv.card_id = c.id AND inv.closing_date IS NOT NULL
+                         ORDER BY inv.due_date DESC LIMIT 1)),
+                    COALESCE(c.due_day, EXTRACT(DAY FROM c.due_date)::smallint,
+                        (SELECT EXTRACT(DAY FROM inv.due_date)::smallint FROM card_invoices inv
+                         WHERE inv.card_id = c.id ORDER BY inv.due_date DESC LIMIT 1)),
                     to_char(c.due_date, 'YYYY-MM-DD'), to_char(a.updated_at AT TIME ZONE 'UTC', {UTC}),
                     c.bills_available, m.position
                  FROM cards c JOIN bank_accounts a ON a.id = c.account_id JOIN bank_connections cn ON cn.id = a.connection_id
@@ -740,20 +763,23 @@ pub(super) async fn state(
                 balance: row.get(9),
                 limit: row.get(10),
                 available: row.get(11),
-                due: row.get(12),
-                updated_at: row.get(13),
+                closing_day: row.get::<_, Option<i16>>(12).map(|d| d as u32),
+                due_day: row.get::<_, Option<i16>>(13).map(|d| d as u32),
+                due: row.get(14),
+                updated_at: row.get(15),
                 bills: bills
                     .iter()
                     .filter(|bill| bill.get::<_, &str>(0) == id)
                     .map(|bill| ConnectedBill {
                         due: bill.get(1),
+                        closing: bill.get(5),
                         total: bill.get(2),
                         currency: app_currency(bill.get(3)),
                         paid: bill.get(4),
                     })
                     .collect(),
-                bills_available: row.get(14),
-                owner: row.get::<_, i16>(15) as u8,
+                bills_available: row.get(16),
+                owner: row.get::<_, i16>(17) as u8,
             }
         })
         .collect();
@@ -834,6 +860,15 @@ pub(super) async fn state(
         )
         .await?
         .get(0);
+    let budgets = db
+        .query(
+            &format!("SELECT category_key, monthly_cents FROM budgets WHERE household_id = {HOUSEHOLD} ORDER BY category_key"),
+            &[&user.0],
+        )
+        .await?
+        .iter()
+        .map(|row| api::Budget { category: row.get(0), monthly_cents: row.get(1) })
+        .collect();
     Ok(Json(api::State {
         me,
         members,
@@ -845,6 +880,7 @@ pub(super) async fn state(
         institutions,
         settlements,
         shared_split_off,
+        budgets,
     }))
 }
 
@@ -901,13 +937,14 @@ async fn validate(
     Ok(card)
 }
 
-pub(super) async fn create_entry(
-    State(state): State<Arc<Backend>>,
-    Extension(user): Extension<User>,
-    Json(mut input): Json<api::Entry>,
-) -> Result<Json<api::Entry>, ApiError> {
-    let db = state.db().await?;
-    let card = validate(&db, user, &mut input).await?;
+/// Grava um lançamento novo (validado como `validate()` manda). Núcleo de `POST /api/entries`,
+/// reusado pelas ferramentas do assistente.
+pub(super) async fn save_entry(
+    db: &Client,
+    user: User,
+    input: &mut api::Entry,
+) -> Result<api::Entry, ApiError> {
+    let card = validate(db, user, input).await?;
     let row = db
         .query_one(
             &format!("WITH saved AS (
@@ -922,20 +959,21 @@ pub(super) async fn create_entry(
             ],
         )
         .await?;
-    Ok(Json(entry(&row)))
+    Ok(entry(&row))
 }
 
-pub(super) async fn update_entry(
-    State(state): State<Arc<Backend>>,
-    Extension(user): Extension<User>,
-    Path(id): Path<String>,
-    Json(mut input): Json<api::Entry>,
-) -> Result<Json<api::Entry>, ApiError> {
-    if !is_uuid(&id) {
+/// Grava a edição completa de um lançamento (mesma validação da criação). Núcleo de
+/// `PUT /api/entries/{id}`, reusado pelas ferramentas do assistente.
+pub(super) async fn save_edited_entry(
+    db: &Client,
+    user: User,
+    id: &str,
+    input: &mut api::Entry,
+) -> Result<api::Entry, ApiError> {
+    if !is_uuid(id) {
         return Err(not_found());
     }
-    let db = state.db().await?;
-    let card = validate(&db, user, &mut input).await?;
+    let card = validate(db, user, input).await?;
     let row = db
         .query_opt(
             &format!("WITH saved AS (
@@ -953,22 +991,15 @@ pub(super) async fn update_entry(
         )
         .await?
         .ok_or_else(not_found)?;
-    Ok(Json(entry(&row)))
+    Ok(entry(&row))
 }
 
-/// Excluir um lançamento importado mantém a transação sem vínculo (FK ON DELETE SET NULL), então
-/// ela não volta nas próximas importações.
-pub(super) async fn delete_entry(
-    State(state): State<Arc<Backend>>,
-    Extension(user): Extension<User>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    if !is_uuid(&id) {
+/// Exclui o lançamento do domicílio; 404 se não existir. Núcleo de `DELETE /api/entries/{id}`.
+pub(super) async fn remove_entry(db: &Client, user: User, id: &str) -> Result<(), ApiError> {
+    if !is_uuid(id) {
         return Err(not_found());
     }
-    let deleted = state
-        .db()
-        .await?
+    let deleted = db
         .execute(
             &format!(
                 "DELETE FROM entries WHERE id = $2::text::uuid AND household_id = {HOUSEHOLD}"
@@ -979,20 +1010,16 @@ pub(super) async fn delete_entry(
     if deleted == 0 {
         return Err(not_found());
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
-pub(super) async fn set_bill_paid(
-    State(state): State<Arc<Backend>>,
-    Extension(user): Extension<User>,
-    Json(input): Json<api::BillPaid>,
-) -> Result<StatusCode, ApiError> {
+/// Marca ou desmarca a fatura importada de um cartão no vencimento dado. Núcleo de
+/// `PUT /api/card-bills/paid`.
+pub(super) async fn mark_bill_paid(db: &Client, user: User, input: &api::BillPaid) -> Result<(), ApiError> {
     if iso_date(&input.due) != Some(input.due.as_str()) {
         return Err(bad("Use uma data AAAA-MM-DD."));
     }
-    let updated = state
-        .db()
-        .await?
+    let updated = db
         .execute(
             &format!(
                 "UPDATE card_invoices ci SET paid = $4 FROM cards c JOIN bank_accounts a ON a.id = c.account_id
@@ -1005,6 +1032,88 @@ pub(super) async fn set_bill_paid(
     if updated == 0 {
         return Err(not_found());
     }
+    Ok(())
+}
+
+pub(super) async fn create_entry(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Json(mut input): Json<api::Entry>,
+) -> Result<Json<api::Entry>, ApiError> {
+    let db = state.db().await?;
+    Ok(Json(save_entry(&db, user, &mut input).await?))
+}
+
+pub(super) async fn update_entry(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Path(id): Path<String>,
+    Json(mut input): Json<api::Entry>,
+) -> Result<Json<api::Entry>, ApiError> {
+    if !is_uuid(&id) {
+        return Err(not_found());
+    }
+    let db = state.db().await?;
+    Ok(Json(save_edited_entry(&db, user, &id, &mut input).await?))
+}
+
+/// Excluir um lançamento importado mantém a transação sem vínculo (FK ON DELETE SET NULL), então
+/// ela não volta nas próximas importações.
+pub(super) async fn delete_entry(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !is_uuid(&id) {
+        return Err(not_found());
+    }
+    let db = state.db().await?;
+    remove_entry(&db, user, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn set_bill_paid(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Json(input): Json<api::BillPaid>,
+) -> Result<StatusCode, ApiError> {
+    let db = state.db().await?;
+    mark_bill_paid(&db, user, &input).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ajuste manual do dia do fechamento do cartão (PUT /api/cards/{account_id}/closing-day): vence o
+/// dia vindo da Pluggy na leitura e sobrevive às reimportações; `None` limpa o ajuste. Núcleo
+/// reusado pelas ferramentas do assistente.
+pub(super) async fn set_closing_day(db: &Client, user: User, card_id: &str, day: Option<u32>) -> Result<(), ApiError> {
+    valid_id(card_id)?;
+    if day.is_some_and(|day| !(1..=31).contains(&day)) {
+        return Err(bad("Informe um dia de fechamento entre 1 e 31."));
+    }
+    let manual = day.map(|day| day as i16);
+    let updated = db
+        .execute(
+            &format!(
+                "UPDATE cards c SET manual_closing_day = $3 FROM bank_accounts a
+                 WHERE a.id = c.account_id AND a.external_id = $2 AND c.household_id = {HOUSEHOLD}"
+            ),
+            &[&user.0, &card_id, &manual],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+pub(super) async fn set_card_closing_day(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Path(card_id): Path<String>,
+    Json(input): Json<api::ClosingDay>,
+) -> Result<StatusCode, ApiError> {
+    let db = state.db().await?;
+    set_closing_day(&db, user, &card_id, input.day).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1090,11 +1199,9 @@ pub(super) fn spawn_sync_loop(state: Arc<Backend>) {
     });
 }
 
-pub(super) async fn create_settlement(
-    State(state): State<Arc<Backend>>,
-    Extension(user): Extension<User>,
-    Json(input): Json<api::Settlement>,
-) -> Result<Json<api::Settlement>, ApiError> {
+/// Registra o acerto entre os membros das posições `from` → `to`. Núcleo de
+/// `POST /api/settlements`, reusado pelas ferramentas do assistente.
+pub(super) async fn save_settlement(db: &Client, user: User, input: api::Settlement) -> Result<api::Settlement, ApiError> {
     if iso_date(&input.date) != Some(input.date.as_str()) {
         return Err(bad("Use a data no formato AAAA-MM-DD."));
     }
@@ -1104,9 +1211,7 @@ pub(super) async fn create_settlement(
     if input.from == input.to {
         return Err(bad("O acerto deve ser entre membros diferentes."));
     }
-    let id: String = state
-        .db()
-        .await?
+    let id: String = db
         .query_opt(
             &format!("INSERT INTO settlements(household_id, from_id, to_id, settled_on, amount_cents)
                  SELECT f.household_id, f.id, t.id, $4::text::date, $5
@@ -1118,7 +1223,33 @@ pub(super) async fn create_settlement(
         .await?
         .ok_or_else(|| bad("Quem paga e quem recebe devem ser membros do domicílio."))?
         .get(0);
-    Ok(Json(api::Settlement { id, ..input }))
+    Ok(api::Settlement { id, ..input })
+}
+
+/// Exclui o acerto do domicílio; 404 se não existir. Núcleo de `DELETE /api/settlements/{id}`.
+pub(super) async fn remove_settlement(db: &Client, user: User, id: &str) -> Result<(), ApiError> {
+    if !is_uuid(id) {
+        return Err(not_found());
+    }
+    let deleted = db
+        .execute(
+            &format!("DELETE FROM settlements WHERE id = $2::text::uuid AND household_id = {HOUSEHOLD}"),
+            &[&user.0, &id],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+pub(super) async fn create_settlement(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Json(input): Json<api::Settlement>,
+) -> Result<Json<api::Settlement>, ApiError> {
+    let db = state.db().await?;
+    Ok(Json(save_settlement(&db, user, input).await?))
 }
 
 pub(super) async fn delete_settlement(
@@ -1129,17 +1260,8 @@ pub(super) async fn delete_settlement(
     if !is_uuid(&id) {
         return Err(not_found());
     }
-    let deleted = state
-        .db()
-        .await?
-        .execute(
-            &format!("DELETE FROM settlements WHERE id = $2::text::uuid AND household_id = {HOUSEHOLD}"),
-            &[&user.0, &id],
-        )
-        .await?;
-    if deleted == 0 {
-        return Err(not_found());
-    }
+    let db = state.db().await?;
+    remove_settlement(&db, user, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1152,18 +1274,13 @@ fn short_name(name: &str, max: usize, message: &'static str) -> Result<String, A
     Ok(name.into())
 }
 
-pub(super) async fn put_reserve(
-    State(state): State<Arc<Backend>>,
-    Extension(user): Extension<User>,
-    Json(input): Json<api::Reserve>,
-) -> Result<StatusCode, ApiError> {
+/// Cria ou substitui a meta única da reserva do domicílio. Núcleo de `PUT /api/reserve`.
+pub(super) async fn save_reserve(db: &Client, user: User, input: &api::Reserve) -> Result<(), ApiError> {
     if input.opening_cents < 0 || input.target_cents < 0 {
         return Err(bad("Os valores da reserva não podem ser negativos."));
     }
     let name = short_name(&input.name, 60, "Informe um nome de até 60 caracteres.")?;
-    let saved = state
-        .db()
-        .await?
+    let saved = db
         .execute(
             "INSERT INTO reserve_goals(household_id, owner_id, name, opening_balance_cents, target_cents)
              SELECT household_id, id, $2, $3, $4 FROM members WHERE client_user_id = $1
@@ -1175,6 +1292,74 @@ pub(super) async fn put_reserve(
     if saved == 0 {
         return Err(not_member());
     }
+    Ok(())
+}
+
+/// Renomeia o membro da posição. Núcleo de `PUT /api/members/{position}`.
+pub(super) async fn rename_position(db: &Client, user: User, position: u8, name: &str) -> Result<(), ApiError> {
+    let name = short_name(name, 40, "Informe um nome de 1 a 40 caracteres.")?;
+    if name.is_empty() {
+        return Err(bad("Informe um nome de 1 a 40 caracteres."));
+    }
+    let updated = db
+        .execute(
+            &format!("UPDATE members SET display_name = $3 WHERE household_id = {HOUSEHOLD} AND position = $2"),
+            &[&user.0, &i16::from(position), &name],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+/// Escolhe (ou limpa, com `None`) o banco da conexão. Vale para os cartões e contas dela já na
+/// leitura do estado e nas próximas importações. Núcleo de `PUT /api/connections/{item}/institution`.
+pub(super) async fn set_institution(db: &Client, user: User, item_id: &str, key: Option<&str>) -> Result<(), ApiError> {
+    valid_id(item_id)?;
+    if let Some(key) = key {
+        let exists: bool = db
+            .query_one("SELECT EXISTS (SELECT 1 FROM institutions WHERE key = $1)", &[&key])
+            .await?
+            .get(0);
+        if !exists {
+            return Err(bad("Instituição inexistente."));
+        }
+    }
+    let updated = db
+        .execute(
+            &format!("UPDATE bank_connections SET institution_key = $3 WHERE external_id = $2 AND household_id = {HOUSEHOLD}"),
+            &[&user.0, &item_id, &key],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+/// Ajustes do domicílio (PUT /api/settings): por ora, o interruptor do rateio compartilhado.
+/// Núcleo da rota, reusado pelas ferramentas do assistente.
+pub(super) async fn save_settings(db: &Client, user: User, input: &api::Settings) -> Result<(), ApiError> {
+    let updated = db
+        .execute(
+            &format!("UPDATE households SET shared_split_off = $2 WHERE id = {HOUSEHOLD}"),
+            &[&user.0, &input.shared_split_off],
+        )
+        .await?;
+    if updated == 0 {
+        return Err(not_member());
+    }
+    Ok(())
+}
+
+pub(super) async fn put_reserve(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Json(input): Json<api::Reserve>,
+) -> Result<StatusCode, ApiError> {
+    let db = state.db().await?;
+    save_reserve(&db, user, &input).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1184,21 +1369,8 @@ pub(super) async fn rename_member(
     Path(position): Path<u8>,
     Json(input): Json<api::MemberName>,
 ) -> Result<StatusCode, ApiError> {
-    let name = short_name(&input.name, 40, "Informe um nome de 1 a 40 caracteres.")?;
-    if name.is_empty() {
-        return Err(bad("Informe um nome de 1 a 40 caracteres."));
-    }
-    let updated = state
-        .db()
-        .await?
-        .execute(
-            &format!("UPDATE members SET display_name = $3 WHERE household_id = {HOUSEHOLD} AND position = $2"),
-            &[&user.0, &i16::from(position), &name],
-        )
-        .await?;
-    if updated == 0 {
-        return Err(not_found());
-    }
+    let db = state.db().await?;
+    rename_position(&db, user, position, &input.name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1210,26 +1382,8 @@ pub(super) async fn set_connection_institution(
     Path(item_id): Path<String>,
     Json(input): Json<api::ConnectionInstitution>,
 ) -> Result<StatusCode, ApiError> {
-    valid_id(&item_id)?;
     let db = state.db().await?;
-    if let Some(key) = &input.institution_key {
-        let exists: bool = db
-            .query_one("SELECT EXISTS (SELECT 1 FROM institutions WHERE key = $1)", &[key])
-            .await?
-            .get(0);
-        if !exists {
-            return Err(bad("Instituição inexistente."));
-        }
-    }
-    let updated = db
-        .execute(
-            &format!("UPDATE bank_connections SET institution_key = $3 WHERE external_id = $2 AND household_id = {HOUSEHOLD}"),
-            &[&user.0, &item_id, &input.institution_key],
-        )
-        .await?;
-    if updated == 0 {
-        return Err(not_found());
-    }
+    set_institution(&db, user, &item_id, input.institution_key.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1239,16 +1393,178 @@ pub(super) async fn put_settings(
     Extension(user): Extension<User>,
     Json(input): Json<api::Settings>,
 ) -> Result<StatusCode, ApiError> {
-    let updated = state
-        .db()
+    let db = state.db().await?;
+    save_settings(&db, user, &input).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ───────────────────────── Orçamentos, conversa e auditoria do assistente ─────────────────────────
+
+/// Define (ou, com valor <= 0, remove) o orçamento mensal do domicílio para uma categoria.
+/// Núcleo de `PUT /api/budgets`, reusado pela ferramenta do assistente.
+pub(super) async fn set_budget(db: &Client, user: User, budget: &api::Budget) -> Result<(), ApiError> {
+    let exists: bool = db
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM categories WHERE key = $1)",
+            &[&budget.category],
+        )
         .await?
-        .execute(
-            &format!("UPDATE households SET shared_split_off = $2 WHERE id = {HOUSEHOLD}"),
-            &[&user.0, &input.shared_split_off],
+        .get(0);
+    if !exists {
+        return Err(bad("Categoria inexistente."));
+    }
+    if budget.monthly_cents <= 0 {
+        db.execute(
+            &format!("DELETE FROM budgets WHERE household_id = {HOUSEHOLD} AND category_key = $2"),
+            &[&user.0, &budget.category],
         )
         .await?;
-    if updated == 0 {
+        return Ok(());
+    }
+    let saved = db
+        .execute(
+            &format!(
+                "INSERT INTO budgets(household_id, category_key, monthly_cents)
+                 SELECT household_id, $2::text, $3::bigint FROM members WHERE client_user_id = $1
+                 ON CONFLICT (household_id, category_key) DO UPDATE SET monthly_cents = EXCLUDED.monthly_cents"
+            ),
+            &[&user.0, &budget.category, &budget.monthly_cents],
+        )
+        .await?;
+    if saved == 0 {
         return Err(not_member());
     }
+    Ok(())
+}
+
+/// `PUT /api/budgets`: grava (ou remove, com valor <= 0) o orçamento da categoria.
+pub(super) async fn put_budget(
+    State(state): State<Arc<Backend>>,
+    Extension(user): Extension<User>,
+    Json(input): Json<api::Budget>,
+) -> Result<StatusCode, ApiError> {
+    let db = state.db().await?;
+    set_budget(&db, user, &input).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Grava uma mensagem na conversa do membro e poda o histórico acima de 200 linhas.
+pub(super) async fn store_chat_message(
+    db: &Client,
+    user: User,
+    me: i16,
+    role: &str,
+    content: &str,
+    ops: &[api::Op],
+) -> Result<(), ApiError> {
+    let ops = serde_json::to_string(ops).unwrap_or_else(|_| "[]".into());
+    db.execute(
+        &format!(
+            "INSERT INTO chat_messages(household_id, member_position, role, content, ops)
+             VALUES ({HOUSEHOLD}, $2, $3, $4, $5::text::jsonb)"
+        ),
+        &[&user.0, &me, &role, &content, &ops],
+    )
+    .await?;
+    db.execute(
+        &format!(
+            "DELETE FROM chat_messages WHERE household_id = {HOUSEHOLD} AND member_position = $2
+             AND id NOT IN (SELECT id FROM chat_messages WHERE household_id = {HOUSEHOLD} AND member_position = $2
+                 ORDER BY id DESC LIMIT 200)"
+        ),
+        &[&user.0, &me],
+    )
+    .await?;
+    Ok(())
+}
+
+/// As últimas 50 mensagens da conversa do membro, mais antigas primeiro. Núcleo de
+/// `GET /api/assistant/history`.
+pub(super) async fn chat_history(db: &Client, user: User, me: i16) -> Result<api::ChatHistory, ApiError> {
+    let rows = db
+        .query(
+            &format!(
+                "SELECT role, content, ops::text FROM (
+                     SELECT id, role, content, ops FROM chat_messages
+                     WHERE household_id = {HOUSEHOLD} AND member_position = $2
+                     ORDER BY id DESC LIMIT 50) recentes ORDER BY recentes.id"
+            ),
+            &[&user.0, &me],
+        )
+        .await?;
+    let messages = rows
+        .iter()
+        .map(|row| {
+            let ops: String = row.get(2);
+            api::ChatMsg {
+                role: row.get(0),
+                content: row.get(1),
+                ops: serde_json::from_str(&ops).unwrap_or_default(),
+            }
+        })
+        .collect();
+    Ok(api::ChatHistory { messages })
+}
+
+/// Apaga a conversa persistida do membro. Núcleo de `DELETE /api/assistant/history`.
+pub(super) async fn clear_chat_history(db: &Client, user: User, me: i16) -> Result<(), ApiError> {
+    db.execute(
+        &format!("DELETE FROM chat_messages WHERE household_id = {HOUSEHOLD} AND member_position = $2"),
+        &[&user.0, &me],
+    )
+    .await?;
+    Ok(())
+}
+
+/// As últimas 100 ações do assistente para o membro, mais recentes primeiro. Núcleo de
+/// `GET /api/assistant/actions`.
+pub(super) async fn assistant_actions(db: &Client, user: User, me: i16) -> Result<api::ActionLog, ApiError> {
+    let rows = db
+        .query(
+            &format!(
+                "SELECT tool, label, to_char(created_at AT TIME ZONE 'UTC', {UTC}) FROM assistant_actions
+                 WHERE household_id = {HOUSEHOLD} AND member_position = $2
+                 ORDER BY id DESC LIMIT 100"
+            ),
+            &[&user.0, &me],
+        )
+        .await?;
+    let actions = rows
+        .iter()
+        .map(|row| api::ActionRecord {
+            tool: row.get(0),
+            label: row.get(1),
+            at: row.get(2),
+        })
+        .collect();
+    Ok(api::ActionLog { actions })
+}
+
+/// Registra uma ação executada pelo assistente (auditoria do membro). Payload grande demais
+/// (p.ex. o listão da busca) é cortado em ~2 KB; se o corte quebrar o JSON, vai sem payload.
+pub(super) async fn record_action(
+    db: &Client,
+    user: User,
+    me: i16,
+    tool: &str,
+    label: &str,
+    payload: &Value,
+) -> Result<(), ApiError> {
+    let mut payload = serde_json::to_string(payload).unwrap_or_default();
+    if payload.len() > 2048 {
+        payload = payload.chars().take(2048).collect();
+        payload = serde_json::from_str::<Value>(&payload)
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+    }
+    let payload = (!payload.is_empty()).then_some(payload);
+    db.execute(
+        &format!(
+            "INSERT INTO assistant_actions(household_id, member_position, tool, label, payload)
+             VALUES ({HOUSEHOLD}, $2, $3, $4, $5::text::jsonb)"
+        ),
+        &[&user.0, &me, &tool, &label, &payload],
+    )
+    .await?;
+    Ok(())
 }

@@ -103,6 +103,9 @@ fn update_checks_downloads_and_swaps_the_appimage_end_to_end() {
     hs.state_mut().screen = flounder::app::Screen::Settings;
     hs.run();
     assert!(hs.query_by_label_contains("Nova versão 0.3.0 baixada").is_some(), "verificou, baixou e ficou pronto");
+    // As seções novas de Ajustes empurram o card para baixo: rolar até o botão antes do clique.
+    hs.get_by_label_contains("Reiniciar agora").scroll_to_me();
+    hs.run();
     hs.get_by_label_contains("Reiniciar agora").click();
     // O harness do kittest não encerra no ViewportCommand::Close (numa janela real o evento
     // fecha o app): rodar alguns passos basta para o clique aplicar a troca.

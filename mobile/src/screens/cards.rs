@@ -1,5 +1,6 @@
 //! Tela Cartões — total das faturas do mês e um bloco por cartão de crédito:
-//! fatura do mês com bolinha de pago (toque alterna) e as compras do mês.
+//! fatura do mês com bolinha de pago (toque alterna), as compras do mês, o fechamento
+//! do ciclo (chip abre o ajuste no modo real) e a fatura em formação ("Próxima fatura").
 
 use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Vec2, pos2};
 use egui_phosphor::regular as icon;
@@ -7,6 +8,7 @@ use flounder::model::{Kind, Month};
 use flounder::widgets as w;
 
 use crate::app::{fmt_money, MobileApp};
+use crate::converter;
 use crate::mock;
 use crate::screens::home::truncar;
 use crate::theme::{self, Cores};
@@ -35,18 +37,35 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
         });
     });
 
-    // Dados de cada cartão (fatura e compras do mês) copiados ANTES do desenho: o toque
-    // na bolinha alterna depois, com &mut app — nada emprestado de app.dados pendura.
+    // Dados de cada cartão (fatura e compras do mês) copiados ANTES do desenho: os toques
+    // (bolinha de pago, chip do fechamento) agem depois, com &mut app — nada emprestado
+    // de app.dados pendura.
     let linhas = linhas(app);
     let mut tocada = None;
+    let mut fecho = None;
     for linha in &linhas {
-        tocada = item(ui, linha, &mes_abr, &mes, &c).or(tocada);
+        match item(ui, linha, &mes_abr, &mes, &c) {
+            Some(Toque::Pago { card, due }) => tocada = Some((card, due)),
+            Some(Toque::Fechamento(id)) => fecho = Some(id),
+            None => {}
+        }
     }
     if let Some((card, due)) = tocada {
         // Alterna no espelho e grava via worker; recalcula a view-model dos cartões
         // APÓS o alternar_pago (atualizar_mes é &mut self) e fora dos blocos de desenho.
         app.alternar_pago(&mock::Acao::Fatura { card, due });
         app.atualizar_mes();
+    }
+    if let Some(card) = fecho {
+        // Folha de ajuste do fechamento: começa com o dia atual do cartão conectado.
+        if let Some(cc) = app.connected_cards.as_ref().and_then(|cs| cs.iter().find(|c| c.id == card)) {
+            app.sheet = Some(crate::app::Sheet::Fechamento(crate::app::FolhaFechamento {
+                card: cc.id.clone(),
+                banco: cc.institution.clone(),
+                dia: cc.closing_day.filter(|d| (1..=31).contains(d)).map(|d| d.to_string()).unwrap_or_default(),
+                tried: false,
+            }));
+        }
     }
 
     // Adicionar cartão novo: só na demonstração (cartões reais chegam da Pluggy).
@@ -84,16 +103,31 @@ struct Compra {
     centavos: i64,
 }
 
+/// Toque num cartão: alterna o pago da fatura ou abre o ajuste do fechamento.
+enum Toque {
+    Pago { card: String, due: String },
+    /// Id do cartão conectado cujo fechamento vai ser ajustado.
+    Fechamento(String),
+}
+
 /// Campos do cartão copiados para fora do `app`, mais a fatura e as compras do mês.
 struct Linha {
+    /// Id do cartão conectado (None na demonstração): habilita o ajuste do fechamento.
+    id: Option<String>,
     banco: String,
     cor: Color32,
     aberta: bool,
     fecha_dias: u32,
+    fechamento_dia: Option<u8>,
     vence_dia: u8,
     fatura_label: String,
     total_cents: i64,
     compras: u32,
+    /// Fatura em formação: total e qtd do que já cai na fatura seguinte.
+    proximo_total_cents: i64,
+    proximo_qtd: u32,
+    /// Totais projetados dos próximos vencimentos ("dez 26", centavos).
+    proximas: Vec<(String, i64)>,
     disponivel_cents: i64,
     limite_cents: i64,
     paga: bool,
@@ -124,12 +158,12 @@ fn linhas(app: &MobileApp) -> Vec<Linha> {
                     .map(|b| FaturaMes { card: cc.id.clone(), due: b.due.clone(), paga: b.paid })
             });
             let compras_mes = match conectado {
-                // Real: entradas do mês ligadas ao cartão conectado pelo id.
+                // Real: compras da fatura que vence no mês (janela do fechamento, como no
+                // desktop e no contador da view-model), ligadas ao cartão pelo id.
                 Some(cc) => {
                     let mut v: Vec<Compra> = app
                         .data
-                        .in_month(month)
-                        .filter(|e| e.connected.as_deref() == Some(cc.id.as_str()))
+                        .connected_purchases(month, &cc.id, cc.closing_day, cc.due_day)
                         .map(|e| Compra {
                             dia: e.date.d as u8,
                             desc: e.desc.clone(),
@@ -163,14 +197,19 @@ fn linhas(app: &MobileApp) -> Vec<Linha> {
                 }
             };
             Linha {
+                id: conectado.map(|cc| cc.id.clone()),
                 banco: cartao.banco.clone(),
                 cor: cartao.cor,
                 aberta: cartao.aberta,
                 fecha_dias: cartao.fecha_dias,
+                fechamento_dia: cartao.fechamento_dia,
                 vence_dia: cartao.vence_dia,
                 fatura_label: cartao.fatura_label.clone(),
                 total_cents: cartao.total_cents,
                 compras: cartao.compras,
+                proximo_total_cents: cartao.proximo_total_cents,
+                proximo_qtd: cartao.proximo_qtd,
+                proximas: cartao.proximas.clone(),
                 disponivel_cents: cartao.disponivel_cents,
                 limite_cents: cartao.limite_cents,
                 paga: cartao.paga,
@@ -181,9 +220,10 @@ fn linhas(app: &MobileApp) -> Vec<Linha> {
         .collect()
 }
 
-/// Cartão de um banco: faixa colorida, header, fatura (com bolinha de pago), compras
-/// do mês e limite disponível. Devolve o alvo do toggle se a bolinha foi tocada.
-fn item(ui: &mut egui::Ui, linha: &Linha, mes_abr: &str, mes: &str, c: &Cores) -> Option<(String, String)> {
+/// Cartão de um banco: faixa colorida, header, fatura (com bolinha de pago), fechamento
+/// do ciclo, compras do mês, fatura em formação e limite disponível. Devolve o toque
+/// (bolinha de pago ou chip do fechamento), aplicado fora dos blocos de desenho.
+fn item(ui: &mut egui::Ui, linha: &Linha, mes_abr: &str, mes: &str, c: &Cores) -> Option<Toque> {
     let mut tocada = None;
     theme::card(ui, |ui| {
         // Faixa fina da cor do banco, colada no topo do conteúdo.
@@ -235,15 +275,35 @@ fn item(ui: &mut egui::Ui, linha: &Linha, mes_abr: &str, mes: &str, c: &Cores) -
         ui.add_space(2.0);
 
         // Prazo: coerente com o chip (a abreviação do mês vem da navegação, não do label).
+        // 0 dias com fechamento informado = fecha hoje (regra do núcleo `days_to_closing`).
         let prazo = if linha.paga {
             format!("fechada · vence {} {mes_abr}", linha.vence_dia)
         } else if linha.aberta {
-            format!("fecha em {} dias · vence {} {mes_abr}", linha.fecha_dias, linha.vence_dia)
+            format!("{} · vence {} {mes_abr}", converter::prazo_fechamento(linha.fecha_dias, linha.fechamento_dia), linha.vence_dia)
         } else {
             format!("sem fatura neste mês · vence {} {mes_abr}", linha.vence_dia)
         };
         ui.label(egui::RichText::new(prazo).font(w::regular(12.0)).color(c.muted));
-        ui.add_space(12.0);
+        ui.add_space(2.0);
+
+        // Fechamento do ciclo: no modo real, o chip abre a folha de ajuste; na
+        // demonstração (cartão sem id), só o texto miúdo informativo.
+        ui.horizontal(|ui| {
+            if linha.id.is_some() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if chip_fechamento(ui, linha, c) {
+                        tocada = Some(Toque::Fechamento(linha.id.clone().unwrap_or_default()));
+                    }
+                });
+            } else {
+                let rotulo = match linha.fechamento_dia {
+                    Some(d) => format!("Fecha dia {d}"),
+                    None => "Sem fechamento informado".to_owned(),
+                };
+                ui.label(egui::RichText::new(rotulo).font(w::regular(12.0)).color(c.faint));
+            }
+        });
+        ui.add_space(8.0);
 
         // Fatura do mês: bolinha de pago ao lado do rótulo (só quando há fatura conectada;
         // sem fatura no mês não há o que alternar — o chip "Sem fatura" já diz).
@@ -252,7 +312,7 @@ fn item(ui: &mut egui::Ui, linha: &Linha, mes_abr: &str, mes: &str, c: &Cores) -
             if let Some(f) = &linha.fatura {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if theme::bolinha_check(ui, f.paga, c.green).clicked() {
-                        tocada = Some((f.card.clone(), f.due.clone()));
+                        tocada = Some(Toque::Pago { card: f.card.clone(), due: f.due.clone() });
                     }
                 });
             }
@@ -314,8 +374,78 @@ fn item(ui: &mut egui::Ui, linha: &Linha, mes_abr: &str, mes: &str, c: &Cores) -
                 linha_compra(ui, comp, c);
             }
         }
+
+        // Fatura em formação: o que veio no/do dia do fechamento em diante já cai na
+        // fatura seguinte (o desktop mostra o mesmo bloco, "Depois do fechamento").
+        if linha.proximo_qtd > 0 || linha.fechamento_dia.is_some() {
+            ui.add_space(14.0);
+            divisoria(ui);
+            ui.add_space(8.0);
+            if linha.proximo_qtd > 0 {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Próxima fatura").font(w::semibold(13.0)).color(c.ink));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} compras", linha.proximo_qtd))
+                                .font(w::regular(13.0))
+                                .color(c.muted),
+                        );
+                        theme::money(ui, linha.proximo_total_cents, 13.0, c.ink);
+                    });
+                });
+            } else {
+                ui.label(
+                    egui::RichText::new("Nada após o fechamento.")
+                        .font(w::regular(12.0))
+                        .color(c.faint),
+                );
+            }
+        }
+
+        // Próximos vencimentos projetados ("dez 26 · R$ 620,00"), logo abaixo da fatura
+        // em formação: as janelas de fechamento dos meses seguintes já com compras.
+        if !linha.proximas.is_empty() {
+            ui.add_space(14.0);
+            divisoria(ui);
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Próximos vencimentos")
+                    .font(w::semibold(13.0))
+                    .color(c.ink),
+            );
+            ui.add_space(4.0);
+            for (mes_label, total) in &linha.proximas {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(mes_label.as_str()).font(w::regular(12.5)).color(c.muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        theme::money(ui, *total, 12.5, c.muted);
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        }
     });
     tocada
+}
+
+/// Chip clicável do fechamento ("Fechamento dia 20 ⚙"): abre a folha de ajuste.
+/// Faltam ≤ 3 dias (0 = hoje)? Destaca em âmbar/vermelho com o prazo por extenso.
+fn chip_fechamento(ui: &mut egui::Ui, linha: &Linha, c: &Cores) -> bool {
+    let (rotulo, fg, bg) = match linha.fechamento_dia {
+        Some(_) if linha.fecha_dias <= 3 => (
+            format!("{}  {}", converter::prazo_fechamento(linha.fecha_dias, linha.fechamento_dia), icon::GEAR),
+            if linha.fecha_dias == 0 { c.red } else { c.orange },
+            if linha.fecha_dias == 0 { c.red_soft } else { c.orange_soft },
+        ),
+        Some(d) => (format!("Fechamento dia {d}  {}", icon::GEAR), c.blue, c.blue_soft),
+        None => (format!("Sem fechamento  {}", icon::GEAR), c.muted, c.line),
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(rotulo).font(w::semibold(11.5)).color(fg))
+            .fill(bg)
+            .corner_radius(255),
+    )
+    .clicked()
 }
 
 /// Uma compra do mês: descrição (trunca com "…") com a nota miudinha ao lado e o valor

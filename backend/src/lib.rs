@@ -1,13 +1,15 @@
 mod local;
 mod db;
 mod assistant;
+mod tools;
+mod routine;
 mod pairing;
 mod releases;
+// Cartões conectados e contrato JSON vivem no núcleo compartilhado; reexportados para
+// os caminhos antigos (`crate::connected`, `crate::api`) seguirem iguais.
 #[allow(dead_code)] // Snapshot só é usado pelo desktop.
-#[path = "../../shared/cards.rs"]
-mod connected;
-#[path = "../../shared/api.rs"]
-mod api;
+pub use flounder_core::connected;
+pub use flounder_core::api;
 
 use axum::{
     Json, Router,
@@ -236,6 +238,7 @@ fn build_router(
         .route("/api/entries", post(db::create_entry))
         .route("/api/entries/{id}", put(db::update_entry).delete(db::delete_entry))
         .route("/api/card-bills/paid", put(db::set_bill_paid))
+        .route("/api/cards/{id}/closing-day", put(db::set_card_closing_day))
         .route("/api/sync", post(db::sync))
         .route("/api/settlements", post(db::create_settlement))
         .route("/api/settlements/{id}", delete(db::delete_settlement))
@@ -243,8 +246,12 @@ fn build_router(
         .route("/api/members/{position}", put(db::rename_member))
         .route("/api/connections/{item_id}/institution", put(db::set_connection_institution))
         .route("/api/settings", put(db::put_settings))
+        .route("/api/budgets", put(db::put_budget))
         .route("/api/assistant/reports", get(assistant::get_reports))
         .route("/api/assistant/refresh", post(assistant::post_refresh))
+        .route("/api/assistant/history", get(assistant::get_history).delete(assistant::delete_history))
+        .route("/api/assistant/actions", get(assistant::get_actions))
+        .route("/api/routine/month", post(routine::post_month))
         .route("/api/pairing-code", get(pairing::codes))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
     // A conversa pode levar o histórico inteiro: corpo maior só nela.
@@ -325,6 +332,7 @@ async fn no_store(request: Request, next: Next) -> Response {
     response
 }
 
+#[derive(Debug)]
 struct ApiError(StatusCode, &'static str);
 
 impl IntoResponse for ApiError {

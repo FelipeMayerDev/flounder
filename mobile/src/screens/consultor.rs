@@ -3,7 +3,7 @@
 //! ciclo junto com o estado; a conversa vai por `Cmd::Chat` e "Analisar agora" por
 //! `Cmd::Analyze` — os resultados voltam por `Msg::Reports` e `Msg::Chat`.
 
-use egui::{Align, Color32, Frame, Layout, Vec2};
+use egui::{Align, Color32, Frame, Layout};
 use egui_phosphor::regular as icon;
 use flounder::assistant::Tab;
 use flounder::backend;
@@ -22,8 +22,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let chat = app.agent.chat.clone();
     let (waiting_chat, chat_erro) = (app.agent.waiting_chat, app.agent.chat_error.clone());
 
+    // Primeira abertura da aba: pede o histórico persistido da conversa (uma vez só;
+    // o agente só enche o chat se o local está vazio, para não pisar o que já foi dito).
+    if !app.historico_pedido {
+        app.historico_pedido = true;
+        app.consultar(backend::Cmd::History);
+    }
+
     // Ações coletadas nos closures, aplicadas fora (o Agent é mutável no app).
-    let (mut analisar, mut escolher_tab, mut enviar_chat) = (false, None::<Tab>, false);
+    let (mut analisar, mut escolher_tab) = (false, None::<Tab>);
 
     // ─── Cabeçalho: abas + "Analisar agora" ────────────────
     theme::card(ui, |ui| {
@@ -157,7 +164,24 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
                         ui.label(egui::RichText::new(&msg.content).font(w::regular(13.5)).color(c.ink));
                     });
             });
-            ui.add_space(6.0);
+            // Selos das operações que o consultor executou ao responder ("criou despesa
+            // Aluguel R$ 1.200 em 15/11"): etiquetas prontas do backend, uma por linha.
+            for op in &msg.ops {
+                Frame::new()
+                    .fill(c.green_soft)
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_max_width((ui.available_width() * 0.78).max(180.0));
+                        ui.label(
+                            egui::RichText::new(format!("{} {}", icon::CHECK_CIRCLE, op.label))
+                                .font(w::regular(12.0))
+                                .color(c.green),
+                        );
+                    });
+                ui.add_space(2.0);
+            }
+            ui.add_space(4.0);
         }
         if waiting_chat {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -169,9 +193,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            // Campo + botão somem exatamente a largura da linha: alinhamento perfeito.
+            // Campo + lixeira + botão somem exatamente a largura da linha: alinhamento perfeito.
             let largura_botao = 40.0;
-            let largura_campo = ui.available_width() - largura_botao - ui.spacing().item_spacing.x;
+            let largura_lixeira = 34.0;
+            let espaco = ui.spacing().item_spacing.x;
+            let largura_campo = ui.available_width() - largura_botao - largura_lixeira - 2.0 * espaco;
+            let mut limpar = false;
             let mut enviar = ui
                 .add_sized(
                     [largura_campo, 40.0],
@@ -181,6 +208,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
                 )
                 .lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui
+                .add_sized(
+                    [largura_lixeira, 40.0],
+                    egui::Button::new(egui::RichText::new(icon::TRASH).font(w::regular(14.0)).color(c.muted))
+                        .fill(c.line)
+                        .corner_radius(12),
+                )
+                .clicked()
+            {
+                limpar = true;
+            }
             if ui
                 .add_sized(
                     [largura_botao, 40.0],
@@ -194,20 +232,26 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
             {
                 enviar = true;
             }
+            if limpar {
+                // Local e backend: zera a conversa aqui e apaga o histórico persistido.
+                app.agent.chat.clear();
+                app.agent.chat_error = None;
+                app.enviar(backend::Cmd::ClearHistory);
+            }
             if enviar && !app.agent.waiting_chat && !app.agent.input.trim().is_empty() {
                 let texto = app.agent.input.trim().to_owned();
-                app.agent.chat.push(flounder::api::ChatMsg { role: "user".into(), content: texto });
+                app.agent.chat.push(flounder::api::ChatMsg { role: "user".into(), content: texto, ops: Vec::new() });
                 app.agent.input.clear();
                 app.agent.waiting_chat = true;
                 app.agent.chat_error = None;
-                app.enviar(backend::Cmd::Chat(app.agent.chat.clone()));
+                app.consultar(backend::Cmd::Chat(app.agent.chat.clone()));
             }
         });
     });
 
     // ─── Ações fora dos closures ───────────────────────────
     if analisar {
-        app.enviar(backend::Cmd::Analyze);
+        app.consultar(backend::Cmd::Analyze);
         app.agent.waiting_analysis = true;
     }
     if let Some(aba) = escolher_tab {

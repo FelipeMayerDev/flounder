@@ -3,7 +3,7 @@
 
 use egui::{Align, Align2, Color32, Frame, Layout, Ui, Vec2, pos2};
 use flounder::backend::{self, PairMsg, Worker};
-use flounder::model::{BillRef, Data, Entry, Kind, Month, Person};
+use flounder::model::{BillRef, Data, Kind, Month, Person};
 use flounder::widgets as w;
 use egui_phosphor::regular as icon;
 use std::sync::mpsc::Receiver;
@@ -46,11 +46,24 @@ pub struct SheetCartao {
     pub tried: bool,
 }
 
+/// Folha do fechamento de um cartão conectado (aba Cartões, modo real).
+#[derive(Clone, Default)]
+pub struct FolhaFechamento {
+    /// Id do cartão conectado (`ConnectedCard.id`), alvo do `Cmd::ClosingDay`.
+    pub card: String,
+    pub banco: String,
+    /// Rascunho do dia (1-31; vazio = sem fechamento).
+    pub dia: String,
+    pub tried: bool,
+}
+
 #[derive(Clone)]
 pub enum Sheet {
     /// Novo lançamento completo — UI e estado em `screens/lancamento.rs`.
     Lancamento(crate::screens::lancamento::Folha),
     Cartao(SheetCartao),
+    /// Ajuste do dia de fechamento de um cartão conectado.
+    Fechamento(FolhaFechamento),
     /// Ajustes (menu ☰): quem usa o celular, versão.
     Menu,
 }
@@ -93,6 +106,18 @@ pub struct MobileApp {
     pub connected_invoices: Vec<flounder::model::ConnectedInvoice>,
     /// Agente GLM (análises e conversa), como no desktop.
     pub agent: flounder::assistant::Agent,
+    /// Orçamentos mensais do domicílio (espelho do `api::State.budgets`).
+    pub budgets: Vec<flounder::api::Budget>,
+    /// Auditoria das ações do assistente (`Cmd::AssistantActions` → `Msg::Actions`).
+    pub acoes: Option<Result<flounder::api::ActionLog, String>>,
+    /// Já pediu as ações do assistente nesta sessão (pede uma vez só).
+    pub acoes_pedidas: bool,
+    /// Relatório da rotina do mês (`Cmd::Routine` → `Msg::Routine`), JSON tolerante.
+    pub rotina: Option<Result<serde_json::Value, String>>,
+    /// Esperando a rotina do mês rodar no backend.
+    pub rotina_esperando: bool,
+    /// Histórico da conversa já pedido ao backend (uma vez só por sessão).
+    pub historico_pedido: bool,
 }
 
 impl Default for MobileApp {
@@ -139,6 +164,13 @@ impl MobileApp {
             connected_cards: None,
             connected_invoices: Vec::new(),
             agent: Default::default(),
+            // Demonstração começa com os orçamentos da história (mercado, lazer).
+            budgets: sessao.is_none().then(mock::orcamentos_demo).unwrap_or_default(),
+            acoes: None,
+            acoes_pedidas: false,
+            rotina: None,
+            rotina_esperando: false,
+            historico_pedido: false,
             demo: sessao.is_none(),
             sessao,
             parear_code: String::new(),
@@ -152,6 +184,16 @@ impl MobileApp {
     pub fn enviar(&mut self, cmd: backend::Cmd) {
         if let Some(w) = self.sessao.as_mut().and_then(|c| c.worker.as_mut()) {
             w.save(cmd);
+        }
+    }
+
+    /// Consulta ao worker (histórico, análises, conversa, ações, rotina), como o `ask` do
+    /// desktop: esses comandos respondem com `Msg::History`/`Reports`/`Chat`/`Actions`/
+    /// `Routine` e nunca com `Msg::Done`, então não podem contar em `pending` do worker
+    /// (contador de gravações sem resposta). Demo: sem efeito.
+    pub fn consultar(&mut self, cmd: backend::Cmd) {
+        if let Some(w) = self.sessao.as_mut().and_then(|c| c.worker.as_mut()) {
+            w.ask(cmd);
         }
     }
 
@@ -226,6 +268,16 @@ impl MobileApp {
         }
         self.data.entries.retain(|e| e.id != id);
         self.enviar(backend::Cmd::Delete(id));
+        self.atualizar_mes();
+    }
+
+    /// Dia de fechamento de um cartão conectado (`None` volta ao mês civil): otimista no
+    /// espelho (a interface já mostra o dia novo) e gravado via worker, como no desktop.
+    pub fn definir_fechamento(&mut self, card: &str, day: Option<u32>) {
+        if let Some(c) = self.connected_cards.as_mut().and_then(|cs| cs.iter_mut().find(|c| c.id == card)) {
+            c.closing_day = day;
+        }
+        self.enviar(backend::Cmd::ClosingDay { card: card.to_owned(), day });
         self.atualizar_mes();
     }
 
@@ -305,7 +357,7 @@ impl MobileApp {
         } else {
             let eu = self.eu;
             let cartoes = self.connected_cards.as_deref();
-            converter::mes(&self.data, cartoes, month, eu)
+            converter::mes(&self.data, cartoes, month, eu, &self.budgets)
         };
     }
 
@@ -349,6 +401,7 @@ impl MobileApp {
             .collect();
         self.connected_cards = Some(state.cards);
         self.data.shared_split_off = state.shared_split_off;
+        self.budgets = state.budgets.clone();
         if let Some(cx) = self.sessao.as_mut() {
             cx.members = state.members.clone();
             cx.loaded = true;
@@ -379,6 +432,15 @@ impl MobileApp {
                     backend::Msg::Offline(e) | backend::Msg::Done(Some(e)) => nota = Some(e),
                     backend::Msg::Reports(r) => self.agent.on_reports(r),
                     backend::Msg::Chat(result) => self.agent.on_chat(result),
+                    // Histórico da conversa persistido: o agente enche o chat se o local está vazio.
+                    backend::Msg::History(result) => self.agent.on_history(result),
+                    // Auditoria das ações do assistente e relatório da rotina: ficam com a
+                    // folha de Ajustes (que desenha o Err como aviso, no lugar).
+                    backend::Msg::Actions(result) => self.acoes = Some(result),
+                    backend::Msg::Routine(result) => {
+                        self.rotina = Some(result);
+                        self.rotina_esperando = false;
+                    }
                     _ => {}
                 }
             }
@@ -450,20 +512,9 @@ impl Default for Conexao {
 }
 
 /// Formata centavos como "1.234,56" (sinal só na chamada com −).
+/// Delega ao núcleo: mesma aritmética inteira do desktop (`model::input_money`).
 pub fn fmt_money(cents: i64) -> String {
-    let abs = cents.abs();
-    // Centavos por aritmética inteira: f64 to_string come o zero à direita ("7999.7").
-    let centavos = format!("{:02}", abs % 100);
-    let inteiro = (abs / 100).to_string();
-    let mut grupos = String::new();
-    for (i, c) in inteiro.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            grupos.push('.');
-        }
-        grupos.push(c);
-    }
-    let inteiro = grupos.chars().rev().collect::<String>();
-    format!("{inteiro},{centavos}")
+    flounder::model::input_money(cents)
 }
 
 pub fn update(app: &mut MobileApp, ui: &mut Ui) {
@@ -556,6 +607,9 @@ fn tela_pareamento(ui: &mut Ui, app: &mut MobileApp) {
     }
     if demo {
         app.demo = true;
+        if app.budgets.is_empty() {
+            app.budgets = mock::orcamentos_demo();
+        }
         app.atualizar_mes();
     }
 }
@@ -841,6 +895,7 @@ fn folha(parent: &mut Ui, app: &mut MobileApp) {
                     match &sheet {
                         Sheet::Lancamento(folha) => crate::screens::lancamento::folha(ui, app, folha),
                         Sheet::Cartao(sheet) => folha_cartao(ui, app, sheet),
+                        Sheet::Fechamento(sheet) => folha_fechamento(ui, app, sheet),
                         Sheet::Menu => crate::screens::ajustes::folha(ui, app),
                     }
                 });
@@ -917,6 +972,69 @@ fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
     acoes_folha(ui, app, |app| salvar_cartao(app));
 }
 
+/// Folha do fechamento de um cartão conectado: dia (1-31), "Aplicar" e "Remover ajuste"
+/// (mesmo conteúdo do modal do desktop). Grava em `MobileApp::definir_fechamento`.
+fn folha_fechamento(ui: &mut Ui, app: &mut MobileApp, sheet: &FolhaFechamento) {
+    let c = theme::cores();
+    ui.label(egui::RichText::new("Fechamento do cartão").font(w::bold(17.0)).color(c.ink));
+    ui.label(egui::RichText::new(&sheet.banco).font(w::regular(13.0)).color(c.muted));
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new("Compras feitas no dia do fechamento ou depois caem na fatura seguinte.")
+            .font(w::regular(12.0))
+            .color(c.muted),
+    );
+    ui.add_space(8.0);
+    let mut dia = sheet.dia.clone();
+    campo(ui, "Fecha no dia (1-31; vazio = mês civil)", &mut dia, "Ex.: 20");
+    if let Some(Sheet::Fechamento(s)) = app.sheet.as_mut() {
+        s.dia = dia;
+    }
+    if sheet.tried {
+        ui.label(egui::RichText::new("Use um dia de 1 a 31.").font(w::regular(12.0)).color(c.red));
+    }
+    ui.add_space(14.0);
+    // "Remover ajuste" só quando o cartão tem fechamento aplicado (igual ao desktop).
+    let com_ajuste = app
+        .connected_cards
+        .as_ref()
+        .and_then(|cs| cs.iter().find(|c| c.id == sheet.card))
+        .is_some_and(|cc| cc.closing_day.is_some());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let partes = if com_ajuste { 3.0 } else { 2.0 };
+        if ui.add_sized([ui.available_width() / partes - 5.0, 44.0], egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14)).clicked() {
+            app.sheet = None;
+        }
+        if com_ajuste {
+            let largura = ui.available_width() / 2.0 - 5.0;
+            if ui.add_sized([largura, 44.0], egui::Button::new(egui::RichText::new(format!("{} Remover ajuste", icon::TRASH)).font(w::semibold(13.5)).color(c.red)).fill(c.red_soft).corner_radius(14)).clicked() {
+                let card = sheet.card.clone();
+                app.sheet = None;
+                app.definir_fechamento(&card, None);
+            }
+        }
+        let largura = ui.available_width();
+        if ui.add_sized([largura, 44.0], egui::Button::new(egui::RichText::new("Aplicar").font(w::bold(15.0)).color(Color32::WHITE)).fill(c.blue).corner_radius(14)).clicked() {
+            aplicar_fechamento(app);
+        }
+    });
+}
+
+/// Aplica o dia da folha do fechamento (1-31); inválido mostra o aviso e a folha fica aberta.
+fn aplicar_fechamento(app: &mut MobileApp) {
+    let Some(Sheet::Fechamento(sheet)) = app.sheet.as_ref().cloned() else { return };
+    let dia: u32 = sheet.dia.trim().parse().unwrap_or(0);
+    if dia == 0 || dia > 31 {
+        if let Some(Sheet::Fechamento(s)) = app.sheet.as_mut() {
+            s.tried = true;
+        }
+        return;
+    }
+    app.sheet = None;
+    app.definir_fechamento(&sheet.card, Some(dia));
+}
+
 fn acoes_folha(ui: &mut Ui, app: &mut MobileApp, salvar: impl FnOnce(&mut MobileApp)) {
     let c = theme::cores();
     ui.horizontal(|ui| {
@@ -944,8 +1062,8 @@ fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) -> egui::Respo
 /// Novo cartão (só demonstração: cartões reais vêm da Pluggy).
 fn salvar_cartao(app: &mut MobileApp) {
     let Some(Sheet::Cartao(sheet)) = app.sheet.as_ref().cloned() else { return };
-    let bruto = sheet.limite.trim().replace('.', "").replace(',', ".");
-    let limite_cents = (bruto.parse::<f64>().unwrap_or(0.0) * 100.0).round() as i64;
+    // Mesmo parser inteiro do desktop: "1.234,56", "1234.56", "R$ 50".
+    let limite_cents = flounder::model::parse_money(&sheet.limite).unwrap_or(0);
     let vence: u8 = sheet.venc.trim().parse().unwrap_or(0);
     let fecha: u8 = sheet.fecha.trim().parse().unwrap_or(0);
     if sheet.banco.trim().is_empty() || limite_cents <= 0 || vence == 0 || vence > 31 || fecha == 0 || fecha > 31 {
@@ -954,7 +1072,7 @@ fn salvar_cartao(app: &mut MobileApp) {
         }
         return;
     }
-    let fecha_dias = (vence as i32 - fecha as i32).rem_euclid(31).max(1) as u32;
+    let fecha_dias = crate::converter::fecha_em_dias(Some(fecha as u32), flounder::model::today());
     let cor = mock::CORES_BANCOS[app.dados.cartoes.cards.len() % mock::CORES_BANCOS.len()];
     let mes = app.mes_label().split_whitespace().next().unwrap_or("do mês").to_lowercase();
     app.dados.cartoes.cards.push(mock::Cartao {
@@ -962,10 +1080,14 @@ fn salvar_cartao(app: &mut MobileApp) {
         cor,
         aberta: true,
         fecha_dias,
+        fechamento_dia: Some(fecha),
         vence_dia: vence,
         fatura_label: format!("Fatura de {mes}"),
         total_cents: 0,
         compras: 0,
+        proximo_total_cents: 0,
+        proximo_qtd: 0,
+        proximas: Vec::new(),
         disponivel_cents: limite_cents,
         limite_cents,
         paga: false,

@@ -23,9 +23,13 @@ pub fn mes(
     connected_cards: Option<&[ConnectedCard]>,
     month: Month,
     eu: usize,
+    budgets: &[flounder::api::Budget],
 ) -> mock::Mes {
-    let s = data.summary(month, flounder::model::Mode::Couple);
     let hoje = flounder::model::today();
+    let s = data.summary(month, flounder::model::Mode::Couple);
+
+    // Totais do mês pela mesma regra do desktop (`model::cash_flow`).
+    let (entradas_cents, saidas_cents) = flounder::model::cash_flow(data.in_month(month));
 
     // Repartição: parte da casa, contas pessoais, dia a dia (consumo corrente) e sobra.
     let pct = |v: i64| s.pct(v).round() as u8;
@@ -82,7 +86,8 @@ pub fn mes(
         dias,
     };
 
-    // Cartões conectados: fatura do mês (ou saldo), compras do mês e limite livre.
+    // Cartões conectados: fatura do mês (ou saldo), compras da fatura, o que já cai na
+    // seguinte (fatura em formação) e limite livre.
     let prefixo = format!("{:04}-{:02}-", month.y, month.m);
     let mes_nome = app_mes_nome(month).to_lowercase();
     let cards: Vec<Cartao> = connected_cards
@@ -97,23 +102,38 @@ pub fn mes(
                 .unwrap_or(1);
             let paga = bill.is_some_and(|b| b.paid);
             let aberta = bill.is_some_and(|b| !b.paid);
-            let fecha_dias = bill
-                .and_then(|b| flounder::model::Date::iso(&b.due))
-                .map(|d| (flounder::model::days_from_civil(d) - flounder::model::days_from_civil(hoje)).max(0) as u32)
-                .unwrap_or(0);
-            let compras = data
-                .in_month(month)
-                .filter(|e| e.connected.as_deref() == Some(c.id.as_str()))
-                .count() as u32;
+            let fechamento_dia = c.closing_day.filter(|d| (1..=31).contains(d)).map(|d| d as u8);
+            let fecha_dias = fecha_em_dias(c.closing_day, hoje);
+            // Compras da fatura que vence no mês (pela janela do fechamento, não o mês civil).
+            let compras = data.connected_purchases(month, &c.id, c.closing_day, c.due_day).count() as u32;
+            // Compras no/do fechamento em diante: já estão na fatura em formação, que fecha
+            // no mês seguinte (a que vence depois — ver `next_invoice_purchases`).
+            let mut proximo_qtd = 0u32;
+            let mut proximo_total_cents = 0i64;
+            for e in data.next_invoice_purchases(month, &c.id, c.closing_day) {
+                proximo_qtd += 1;
+                proximo_total_cents += if e.kind == Kind::Income { -e.amount } else { e.amount };
+            }
+            // Próximos vencimentos ("dez 26", jan 27…): só os meses com total, do mês seguinte em diante.
+            let proximas = data
+                .next_invoices(&c.id, &c.bills, c.closing_day, c.due_day, month, 3)
+                .into_iter()
+                .filter(|(_, total)| *total != 0)
+                .map(|(m, total)| (m.short().to_lowercase(), total))
+                .collect();
             Cartao {
                 banco: c.institution.clone(),
                 cor: egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]),
                 aberta,
                 fecha_dias,
+                fechamento_dia,
                 vence_dia,
                 fatura_label: if bill.is_some() { format!("Fatura de {mes_nome}") } else { "Saldo utilizado".into() },
                 total_cents: bill.and_then(|b| b.total).or(c.balance).unwrap_or(0),
                 compras,
+                proximo_total_cents,
+                proximo_qtd,
+                proximas,
                 disponivel_cents: c.available.unwrap_or(0),
                 limite_cents: c.limit.unwrap_or(0),
                 paga,
@@ -199,15 +219,55 @@ pub fn mes(
         }
     }
 
+    // Orçamentos de quem usa o app por categoria (do mais estourado ao mais folgado) e
+    // contas fixas fora da média histórica (fogem ≥ 20%).
+    let orcamentos = flounder::model::budget_usage(&s.by_category, budgets);
+    let alertas_preco = data.price_alerts(month, 0.20);
+
+    // Aviso de fechamento: o primeiro cartão conectado com fechamento válido que fecha
+    // em ≤ 3 dias (0 = fecha hoje; o núcleo já devolve 0 para dia inválido, que o filtro
+    // descarta). O mobile mostra as contas do domicílio, então qualquer cartão avisa.
+    let fechamento_alerta = connected_cards
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|c| c.closing_day.filter(|d| (1..=31).contains(d)).map(|d| (&c.institution, d)))
+        .map(|(banco, d)| (banco.clone(), flounder::model::days_to_closing(d, hoje)))
+        .find(|(_, dias)| *dias <= 3);
+
     mock::Mes {
         vazio: s.empty,
         salario_cents: s.income,
+        entradas_cents,
+        saidas_cents,
         saldo: mock::Saldo { centavos: s.balance, pct_livre: pct(s.balance) },
         reparticao,
         pagar,
         cartoes,
         casa,
         fluxo,
+        orcamentos,
+        alertas_preco,
+        fechamento_alerta,
+    }
+}
+
+/// Dias até a próxima ocorrência do fechamento, a partir de `hoje` (0 = fecha hoje).
+/// Delega ao núcleo (`model::days_to_closing`); sem fechamento informado, 0 — o mesmo
+/// valor de "fecha hoje", então quem mostra usa `fechamento_dia` para distinguir.
+pub fn fecha_em_dias(closing_day: Option<u32>, hoje: flounder::model::Date) -> u32 {
+    closing_day.map(|d| flounder::model::days_to_closing(d, hoje)).unwrap_or(0)
+}
+
+/// Palavra do prazo do fechamento: "fecha hoje", "fecha amanhã", "fecha em N dias".
+/// Sem fechamento informado, o texto fica neutro (nada a contar).
+pub fn prazo_fechamento(fecha_dias: u32, fechamento_dia: Option<u8>) -> String {
+    match fechamento_dia {
+        Some(_) => match fecha_dias {
+            0 => "fecha hoje".into(),
+            1 => "fecha amanhã".into(),
+            n => format!("fecha em {n} dias"),
+        },
+        None => "sem fechamento informado".into(),
     }
 }
 

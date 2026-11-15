@@ -27,8 +27,15 @@ pub enum Msg {
     Synced(Result<api::SyncResult, String>),
     /// Análises do assistente (a do casal e a de quem usa o app).
     Reports(api::AssistantReports),
-    /// Resposta da conversa com o assistente; `Some` com a mensagem em caso de erro.
-    Chat(Result<String, String>),
+    /// Resposta da conversa com o assistente (com as ações que ele executou no app);
+    /// `Some` com a mensagem em caso de erro.
+    Chat(Result<api::ChatReply, String>),
+    /// Histórico persistido da conversa de quem usa o app.
+    History(Result<api::ChatHistory, String>),
+    /// Auditoria das ações do assistente.
+    Actions(Result<api::ActionLog, String>),
+    /// Relatório da rotina do mês (`Cmd::Routine`); `Err` com a mensagem de falha.
+    Routine(Result<serde_json::Value, String>),
 }
 
 /// Thread de sincronização de um membro (`client-N`). Soltar a struct encerra a thread
@@ -51,6 +58,8 @@ pub enum Cmd {
     Member(u8, String),
     /// Banco escolhido para a conexão (`item_id`); `None` = não informado.
     Institution(String, Option<String>),
+    /// Dia de fechamento do cartão conectado; `None` volta ao mês civil.
+    ClosingDay { card: String, day: Option<u32> },
     /// Ajustes do domicílio (rateio compartilhado).
     Settings(api::Settings),
     /// Pede as análises do assistente (responde com `Msg::Reports`).
@@ -59,6 +68,16 @@ pub enum Cmd {
     Analyze,
     /// Conversa com o assistente: todo o histórico, mais recente por último.
     Chat(Vec<api::ChatMsg>),
+    /// Orçamento mensal de uma categoria de despesa (valor <= 0 remove).
+    Budget(api::Budget),
+    /// Pede o histórico da conversa de quem usa o app (responde com `Msg::History`).
+    History,
+    /// Apaga o histórico da conversa de quem usa o app.
+    ClearHistory,
+    /// Pede a auditoria das ações do assistente (responde com `Msg::Actions`).
+    AssistantActions,
+    /// Roda a rotina do mês (`"AAAA-MM"`; vazio = o mês atual); responde com `Msg::Routine`.
+    Routine(String),
 }
 
 pub struct Worker {
@@ -81,6 +100,14 @@ impl Worker {
 
     pub fn save(&mut self, cmd: Cmd) {
         self.pending += 1;
+        let _ = self.tx.send(cmd);
+    }
+
+    /// Consulta ao worker (histórico, ações, rotina, análises, conversa): não conta como
+    /// gravação, porque esses comandos respondem com `Msg::History`/`Actions`/`Routine`/
+    /// `Reports`/`Chat` e nunca com `Msg::Done` — contá-los seguraria a aplicação dos
+    /// estados para sempre.
+    pub fn ask(&mut self, cmd: Cmd) {
         let _ = self.tx.send(cmd);
     }
 }
@@ -213,9 +240,45 @@ fn run(token: &str, base: &str, ctx: &egui::Context, replies: &Sender<Msg>, comm
                         .and_then(|mut r| r.body_mut().read_to_string())
                         .map_err(|err| describe(err, base))
                         .and_then(|body| serde_json::from_str::<api::ChatReply>(&body).map_err(|_| UNEXPECTED.to_string()));
-                    send(Msg::Chat(result.map(|r| r.content)));
+                    // O assistente pode ter agido no app: com ações na resposta, sair do ciclo
+                    // recarrega o estado na hora (o mesmo fetch do ciclo de 5 s), para as telas
+                    // do desktop e do celular acompanharem em ~1 s em vez de esperar a próxima.
+                    let acted = result.as_ref().is_ok_and(|r| !r.ops.is_empty());
+                    send(Msg::Chat(result));
+                    if acted {
+                        break;
+                    }
                 }
-                Ok(cmd @ (Cmd::Settle(_) | Cmd::Unsettle(_) | Cmd::Reserve(_) | Cmd::Member(..) | Cmd::Institution(..) | Cmd::Settings(_))) => {
+                Ok(Cmd::History) => {
+                    let history = get_json(&agent, "/api/assistant/history")
+                        .and_then(|body| serde_json::from_str::<api::ChatHistory>(&body).map_err(|_| UNEXPECTED.to_string()));
+                    send(Msg::History(history));
+                }
+                Ok(Cmd::ClearHistory) => {
+                    let result = agent.delete(format!("{base}/api/assistant/history")).header("Authorization", &auth).call()
+                        .map(drop).map_err(|err| describe(err, base));
+                    send(Msg::Done(result.err().map(|err| format!("Não foi possível limpar a conversa. {err}"))));
+                }
+                Ok(Cmd::AssistantActions) => {
+                    let actions = get_json(&agent, "/api/assistant/actions")
+                        .and_then(|body| serde_json::from_str::<api::ActionLog>(&body).map_err(|_| UNEXPECTED.to_string()));
+                    send(Msg::Actions(actions));
+                }
+                Ok(Cmd::Routine(month)) => {
+                    let result = agent.post(format!("{base}/api/routine/month")).header("Authorization", &auth)
+                        .header("Content-Type", "application/json")
+                        .send(&serde_json::json!({ "month": month }).to_string())
+                        .and_then(|mut r| r.body_mut().read_to_string())
+                        .map_err(|err| describe(err, base))
+                        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).map_err(|_| UNEXPECTED.to_string()));
+                    // A rotina pode criar lançamentos: sair do ciclo recarrega o estado na hora.
+                    let acted = result.is_ok();
+                    send(Msg::Routine(result));
+                    if acted {
+                        break;
+                    }
+                }
+                Ok(cmd @ (Cmd::Settle(_) | Cmd::Unsettle(_) | Cmd::Reserve(_) | Cmd::Member(..) | Cmd::Institution(..) | Cmd::Settings(_) | Cmd::ClosingDay { .. } | Cmd::Budget(_))) => {
                     let (what, result) = match cmd {
                         Cmd::Settle(s) => {
                             let body = serde_json::to_string(&api::Settlement {
@@ -254,9 +317,17 @@ fn run(token: &str, base: &str, ctx: &egui::Context, replies: &Sender<Msg>, comm
                             "Não foi possível salvar o banco da conexão.",
                             put(format!("/api/connections/{item}/institution"), serde_json::to_string(&api::ConnectionInstitution { institution_key: key }).expect("serializa")),
                         ),
+                        Cmd::ClosingDay { card, day } => (
+                            "Não foi possível salvar o fechamento do cartão.",
+                            put(format!("/api/cards/{card}/closing-day"), serde_json::json!({ "day": day }).to_string()),
+                        ),
                         Cmd::Settings(s) => (
                             "Não foi possível salvar os ajustes.",
                             put("/api/settings".into(), serde_json::to_string(&s).expect("Settings serializa")),
+                        ),
+                        Cmd::Budget(b) => (
+                            "Não foi possível salvar o orçamento.",
+                            put("/api/budgets".into(), serde_json::to_string(&b).expect("Budget serializa")),
                         ),
                         _ => unreachable!(),
                     };

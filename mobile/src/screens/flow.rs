@@ -6,7 +6,7 @@ use egui_phosphor::regular as icon;
 use flounder::widgets as w;
 
 use crate::app::MobileApp;
-use crate::mock::{DiaFluxo, MEMBROS};
+use crate::mock::MEMBROS;
 use crate::screens::lancamento;
 use crate::theme;
 
@@ -46,9 +46,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
 }
 
 /// Cartão-resumo "Fluxo de caixa" do mês: entradas, saídas, saldo e o botão de copiar.
+/// Totais já vêm prontos (`converter::mes` via `model::cash_flow`), a mesma regra do desktop.
 fn resumo(ui: &mut egui::Ui, app: &mut MobileApp) {
     let c = theme::cores();
-    let (entradas, saidas) = totais(&app.dados.fluxo);
+    let (entradas, saidas) = (app.dados.entradas_cents, app.dados.saidas_cents);
     let saldo = entradas - saidas;
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
@@ -78,22 +79,6 @@ fn coluna(ui: &mut egui::Ui, rotulo: &str, cents: i64, cor: Color32) {
         ui.add_space(3.0);
         theme::money(ui, cents, 15.0, cor);
     });
-}
-
-/// (entradas, saídas) do mês, somando positivo/negativo do fluxo.
-fn totais(fluxo: &[DiaFluxo]) -> (i64, i64) {
-    let mut ent = 0i64;
-    let mut sai = 0i64;
-    for d in fluxo {
-        for e in &d.entradas {
-            if e.centavos >= 0 {
-                ent += e.centavos;
-            } else {
-                sai -= e.centavos;
-            }
-        }
-    }
-    (ent, sai)
 }
 
 /// Pílula "Copiar do mês anterior": repete os lançamentos manuais do mês passado

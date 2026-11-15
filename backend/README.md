@@ -274,7 +274,7 @@ valores, sinais ou moedas para o modelo financeiro da demonstração.
 |---|---|
 | `type: CREDIT`, `subtype: CREDIT_CARD` | Identificação de conta de cartão |
 | `creditData.creditLimit`, `availableCreditLimit` | Limites total e disponível |
-| `creditData.balanceDueDate`, `balanceCloseDate` | Vencimento e fechamento, quando informados |
+| `creditData.balanceDueDate`, `balanceCloseDate` | Vencimento e fechamento, quando informados; o dia do mês de ambos já é lido e guardado no cartão (`due_day` e `closing_day`), e a fatura guarda a data de fechamento (`closeDate`/`summary`) |
 | `balance` | Semântica depende do conector; em Open Finance pode representar limite utilizado |
 | `bills.results[].totalAmount`, `dueDate`, `payments` | Valores, vencimentos e pagamentos das faturas |
 | `transactions.results[].creditCardMetadata` | Parcelas e metadados específicos do cartão |
