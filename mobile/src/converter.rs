@@ -207,6 +207,7 @@ pub fn mes(
         let entrada = Entrada {
             id: e.id,
             desc: e.desc.clone(),
+            categoria: e.category,
             centavos,
             membro: e.owner.idx(),
             shared: e.shared,

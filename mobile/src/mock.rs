@@ -2,20 +2,9 @@
 //! mais simples. Fase 2 troca por `flounder::model::Data` vindo da API do backend.
 
 use egui::Color32;
+use flounder::model::Category;
 
 pub const MEMBROS: [(&str, Color32); 2] = [("Felipe", Color32::from_rgb(47, 108, 255)), ("Larissa", Color32::from_rgb(240, 68, 56))];
-
-/// Cores de marca para cartões novos (Santander, Nubank, Itaú, Inter, Caixa, Bradesco, C6, PicPay).
-pub const CORES_BANCOS: [Color32; 8] = [
-    Color32::from_rgb(234, 29, 37),
-    Color32::from_rgb(130, 10, 209),
-    Color32::from_rgb(236, 112, 0),
-    Color32::from_rgb(255, 122, 0),
-    Color32::from_rgb(0, 112, 184),
-    Color32::from_rgb(165, 7, 30),
-    Color32::from_rgb(20, 20, 20),
-    Color32::from_rgb(33, 194, 94),
-];
 
 pub struct Mes {
     pub vazio: bool,
@@ -150,6 +139,7 @@ pub struct Entrada {
     /// Id local da entrada (fase 2: tocar para editar/excluir).
     pub id: u32,
     pub desc: String,
+    pub categoria: Category,
     pub centavos: i64,
     pub membro: usize,
     pub shared: bool,
@@ -167,16 +157,40 @@ pub fn orcamentos_demo() -> Vec<flounder::api::Budget> {
 
 /// Dados do mês; meses sem nada voltam `Mes::VAZIO`.
 pub fn para(y: i32, m: u8) -> Mes {
-    match (y, m) {
+    let mut mes = match (y, m) {
         (2026, 12) => dezembro(),
         (2026, 11) => novembro(),
         _ => Mes { vazio: true, salario_cents: 0, entradas_cents: 0, saidas_cents: 0, saldo: Saldo { centavos: 0, pct_livre: 0 }, reparticao: vec![], pagar: Pagar { dia: 1, total_cents: 0, contas: vec![], dias: vec![] }, cartoes: Cartoes { total_faturas_cents: 0, cards: vec![] }, casa: Casa { total_contas: 0, pendentes_qtd: 0, pendentes_total_cents: 0, saldo_acerto: 0, acertos: vec![], bills: vec![] }, fluxo: vec![], orcamentos: vec![], alertas_preco: vec![], fechamento_alerta: None },
+    };
+    for (i, entrada) in mes.fluxo.iter_mut().flat_map(|d| &mut d.entradas).enumerate() {
+        entrada.id = i as u32 + 1;
     }
+    mes
 }
 
 impl Mes {
     pub fn vazio() -> Mes {
         para(0, 1)
+    }
+
+    pub fn ajustar_fluxo(&mut self, centavos: i64, direcao: i64) {
+        if centavos >= 0 {
+            self.entradas_cents = self.entradas_cents.saturating_add(centavos * direcao);
+        } else {
+            self.saidas_cents = self.saidas_cents.saturating_add(-centavos * direcao);
+        }
+    }
+
+    pub fn remover_lancamento(&mut self, id: u32) {
+        let Some((dia, entrada)) = self.fluxo.iter_mut().find_map(|dia| {
+            let pos = dia.entradas.iter().position(|e| e.id == id)?;
+            let entrada = dia.entradas.remove(pos);
+            Some((dia.entradas.is_empty(), entrada))
+        }) else { return };
+        if dia {
+            self.fluxo.retain(|dia| !dia.entradas.is_empty());
+        }
+        self.ajustar_fluxo(entrada.centavos, -1);
     }
 }
 
@@ -273,33 +287,33 @@ fn dezembro() -> Mes {
         },
         fluxo: vec![
             DiaFluxo { dia: 1, entradas: vec![
-                Entrada { id: 0, desc: "Apartamento Vila Mariana".into(), centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
-                Entrada { id: 0, desc: "Aluguel".into(), centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
-                Entrada { id: 0, desc: "Condomínio".into(), centavos: -158_000, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Apartamento Vila Mariana".into(), categoria: Category::Housing, centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Aluguel".into(), categoria: Category::Housing, centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Condomínio".into(), categoria: Category::Housing, centavos: -158_000, membro: 0, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 3, entradas: vec![
-                Entrada { id: 0, desc: "iFood".into(), centavos: -8_460, membro: 0, shared: false, card: Some("Santander Unique".into()), paid: false },
+                Entrada { id: 0, desc: "iFood".into(), categoria: Category::Leisure, centavos: -8_460, membro: 0, shared: false, card: Some("Santander Unique".into()), paid: false },
             ] },
             DiaFluxo { dia: 5, entradas: vec![
-                Entrada { id: 0, desc: "Salário".into(), centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
-                Entrada { id: 0, desc: "Luz".into(), centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Salário".into(), categoria: Category::Salary, centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
+                Entrada { id: 0, desc: "Luz".into(), categoria: Category::Utilities, centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 6, entradas: vec![
-                Entrada { id: 0, desc: "Mercado do bairro".into(), centavos: -31_270, membro: 1, shared: false, card: Some("Santander Unique".into()), paid: false },
+                Entrada { id: 0, desc: "Mercado do bairro".into(), categoria: Category::Groceries, centavos: -31_270, membro: 1, shared: false, card: Some("Santander Unique".into()), paid: false },
             ] },
             DiaFluxo { dia: 10, entradas: vec![
-                Entrada { id: 0, desc: "Internet".into(), centavos: -12_990, membro: 0, shared: true, card: None, paid: true },
-                Entrada { id: 0, desc: "Netflix".into(), centavos: -5_590, membro: 1, shared: false, card: Some("Nubank".into()), paid: false },
+                Entrada { id: 0, desc: "Internet".into(), categoria: Category::Utilities, centavos: -12_990, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Netflix".into(), categoria: Category::Leisure, centavos: -5_590, membro: 1, shared: false, card: Some("Nubank".into()), paid: false },
             ] },
             DiaFluxo { dia: 12, entradas: vec![
-                Entrada { id: 0, desc: "Freelance de design".into(), centavos: 150_000, membro: 1, shared: false, card: None, paid: true },
-                Entrada { id: 0, desc: "Farmácia".into(), centavos: -8_730, membro: 0, shared: false, card: Some("Nubank".into()), paid: false },
+                Entrada { id: 0, desc: "Freelance de design".into(), categoria: Category::Salary, centavos: 150_000, membro: 1, shared: false, card: None, paid: true },
+                Entrada { id: 0, desc: "Farmácia".into(), categoria: Category::Health, centavos: -8_730, membro: 0, shared: false, card: Some("Nubank".into()), paid: false },
             ] },
             DiaFluxo { dia: 15, entradas: vec![
-                Entrada { id: 0, desc: "Plano de saúde".into(), centavos: -560_300, membro: 1, shared: true, card: None, paid: false },
+                Entrada { id: 0, desc: "Plano de saúde".into(), categoria: Category::Health, centavos: -560_300, membro: 1, shared: true, card: None, paid: false },
             ] },
             DiaFluxo { dia: 20, entradas: vec![
-                Entrada { id: 0, desc: "Água".into(), centavos: -54_700, membro: 0, shared: true, card: None, paid: false },
+                Entrada { id: 0, desc: "Água".into(), categoria: Category::Utilities, centavos: -54_700, membro: 0, shared: true, card: None, paid: false },
             ] },
         ],
         // História: mercado em 80% do orçamento (âmbar) e lazer folgado; a Luz de dezembro
@@ -344,15 +358,15 @@ fn novembro() -> Mes {
         },
         fluxo: vec![
             DiaFluxo { dia: 1, entradas: vec![
-                Entrada { id: 0, desc: "Apartamento Vila Mariana".into(), centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
-                Entrada { id: 0, desc: "Aluguel".into(), centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Apartamento Vila Mariana".into(), categoria: Category::Housing, centavos: -233_254, membro: 1, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Aluguel".into(), categoria: Category::Housing, centavos: -480_000, membro: 1, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 5, entradas: vec![
-                Entrada { id: 0, desc: "Salário".into(), centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
-                Entrada { id: 0, desc: "Luz".into(), centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
+                Entrada { id: 0, desc: "Salário".into(), categoria: Category::Salary, centavos: 2_800_000, membro: 0, shared: false, card: None, paid: true },
+                Entrada { id: 0, desc: "Luz".into(), categoria: Category::Utilities, centavos: -34_000, membro: 0, shared: true, card: None, paid: true },
             ] },
             DiaFluxo { dia: 12, entradas: vec![
-                Entrada { id: 0, desc: "Presente de aniversário".into(), centavos: -12_000, membro: 1, shared: false, card: None, paid: false },
+                Entrada { id: 0, desc: "Presente de aniversário".into(), categoria: Category::Shopping, centavos: -12_000, membro: 1, shared: false, card: None, paid: false },
             ] },
         ],
         orcamentos: vec![("groceries".into(), 480_00, 600_00), ("leisure".into(), 45_00, 200_00)],

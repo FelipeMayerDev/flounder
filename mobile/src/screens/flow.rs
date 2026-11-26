@@ -14,19 +14,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     // Dias sempre em ordem crescente (o FAB já ordena, mas por garantia).
     app.dados.fluxo.sort_by_key(|d| d.dia);
 
-    // Demonstração: os fixtures do mock nascem com id 0 — numera as entradas (1, 2, 3…)
-    // para o toque abrir a edição da linha certa e o Excluir derrubar só a entrada tocada.
-    // Sessão real: os ids vêm do backend (`Data::upsert`) e ficam como estão.
-    if app.demo {
-        let mut proximo = 1u32;
-        for d in &mut app.dados.fluxo {
-            for e in &mut d.entradas {
-                e.id = proximo;
-                proximo += 1;
-            }
-        }
-    }
-
     // Mês aberto sem nenhum lançamento: o botão de copiar continua à mão.
     if app.dados.fluxo.is_empty() {
         theme::vazio(ui, "🐟", "Nenhum lançamento neste mês.");
@@ -113,7 +100,7 @@ fn dias(ui: &mut egui::Ui, app: &MobileApp, editar: &mut Vec<u32>) {
                 ui.label(egui::RichText::new(format!("Dia {dia}")).font(w::semibold(14.0)).color(c.ink));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let cor = if saldo_dia > 0 { c.green } else if saldo_dia < 0 { c.red } else { c.muted };
-                    theme::money(ui, saldo_dia, 13.0, cor);
+                    theme::money_inline(ui, saldo_dia, 14.0, cor);
                 });
             });
             ui.add_space(8.0);
@@ -151,28 +138,37 @@ fn linha(ui: &mut egui::Ui, i: usize, j: usize, app: &MobileApp, editar: &mut Ve
     let quem = if e.membro == app.eu { "Você" } else { nome };
     let inicial = nome.chars().next().unwrap_or('?').to_string();
 
-    let conteudo = ui.horizontal(|ui| {
+    let altura_linha = 26.0;
+    let conteudo = ui.horizontal_top(|ui| {
         // Seta pequena: receita sobe (verde), despesa desce (vermelho).
-        let (brect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+        let (brect, _) = ui.allocate_exact_size(Vec2::splat(altura_linha), Sense::hover());
         ui.painter().rect_filled(brect, CornerRadius::same(10), suave);
         ui.painter().text(brect.center(), Align2::CENTER_CENTER, glifo.to_string(), w::semibold(13.0), cor_valor);
         ui.add_space(4.0);
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
             // Valor sempre inteiro à direita; a descrição encolhe (trunca com …) em vez de empurrá-lo.
             // Pendente leva o chip "a pagar" ao lado do valor.
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    theme::money(ui, e.centavos, 14.0, cor_valor);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), altura_linha),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    theme::money_inline(ui, e.centavos, 14.0, cor_valor);
                     if !e.paid {
                         ui.add_space(6.0);
                         chipzinho(ui, "a pagar", c.orange, c.orange_soft);
                     }
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(e.desc.as_str()).font(w::semibold(14.0)).color(c.ink))
-                            .truncate(),
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), altura_linha),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(e.desc.as_str()).font(w::semibold(14.0)).color(c.ink),
+                            ).truncate());
+                        },
                     );
-                });
-            });
+                },
+            );
             // Quem lançou, cartão usado e compartilhamento (quebra para a linha de baixo se não couber).
             ui.horizontal_wrapped(|ui| {
                 let (drect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());

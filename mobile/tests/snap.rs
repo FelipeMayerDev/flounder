@@ -4,7 +4,7 @@
 use egui_kittest::Harness;
 use flounder::api::{AssistantReport, AssistantReports};
 use flounder::model::Person;
-use flounder_mobile::app::{Conexao, MobileApp, Sheet, SheetCartao, Tab};
+use flounder_mobile::app::{Conexao, MobileApp, Tab};
 
 fn shot(app: MobileApp, name: &str, dir: &std::path::Path) {
     // As animações de entrada deixam o primeiro quadro invisível no render de teste.
@@ -86,14 +86,4 @@ fn capturas() {
         ops: Vec::new(),
     }];
     shot(app, "consultor", &dir);
-    // Folha de novo cartão, preenchida (só existe no modo demonstração).
-    let mut app = MobileApp { tab: Tab::Cartoes, demo: true, ..MobileApp::load(None) };
-    app.sheet = Some(Sheet::Cartao(SheetCartao {
-        banco: "Inter".into(),
-        limite: "5.000,00".into(),
-        fecha: "25".into(),
-        venc: "10".into(),
-        ..Default::default()
-    }));
-    shot(app, "cartao-novo", &dir);
 }

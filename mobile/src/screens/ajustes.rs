@@ -162,72 +162,75 @@ fn secao_orcamentos(ui: &mut Ui, app: &mut MobileApp, c: &Cores) {
     );
     ui.add_space(6.0);
 
-    // Uso do mês (categoria, gasto de quem usa o app, limite), copiado da view-model.
-    let usos: Vec<(String, i64, i64)> = app.dados.orcamentos.clone();
+    // Uso do mês (categoria, gasto de quem usa o app, limite).
+    let usos = &app.dados.orcamentos;
     // Buffers de edição por categoria na memória do egui: nascem com o orçamento atual
     // e sobrevivem entre frames (o campo não "pisa" no que está sendo digitado).
     let id_bufs = egui::Id::new("orcamento_bufs");
     let mut bufs: BTreeMap<String, String> = ui.ctx().data_mut(|d| d.get_temp(id_bufs).unwrap_or_default());
+    let largura_categoria = CATEGORIAS_ORCAMENTO.iter()
+        .map(|key| ui.painter().layout_no_wrap(rotulo_categoria(key).to_owned(), w::semibold(13.0), c.ink).size().x)
+        .fold(0.0, f32::max)
+        .ceil()
+        .min(ui.available_width() * 0.38);
+    let largura_salvar = 66.0;
+    let altura = 40.0;
+    let mut salvar = None;
     for key in CATEGORIAS_ORCAMENTO {
-        let atual = app.budgets.iter().find(|b| b.category == *key).map(|b| b.monthly_cents).unwrap_or(0);
-        bufs.entry((*key).to_owned()).or_insert_with(|| {
+        let nome = rotulo_categoria(key);
+        let atual = app.budgets.iter().find(|b| b.category == key).map_or(0, |b| b.monthly_cents);
+        let buf = bufs.entry(key.to_owned()).or_insert_with(|| {
             if atual > 0 {
-                flounder::model::input_money(atual)
+                fmt_money(atual)
             } else {
                 String::new()
             }
         });
-    }
-    let mut salvar: Option<(&str, i64)> = None;
-    for key in CATEGORIAS_ORCAMENTO {
-        let uso = usos.iter().find(|(cat, _, _)| *cat == *key);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(rotulo_categoria(key)).font(w::semibold(13.0)).color(c.ink));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let largura_salvar = 72.0;
-                if ui
-                    .add_sized(
-                        [largura_salvar, 32.0],
-                        egui::Button::new(egui::RichText::new("Salvar").font(w::semibold(12.0)).color(c.ink))
-                            .fill(c.line)
-                            .corner_radius(10),
-                    )
-                    .clicked()
-                {
-                    // Mesmo parser inteiro do resto do app ("1.234,56", "R$ 50"); vazio = 0 = remove.
-                    let cents = flounder::model::parse_money(&bufs[key]).unwrap_or(0);
+        let uso = usos.iter().find(|(cat, gasto, limite)| cat == key && *gasto > 0 && *limite > 0);
+        let invalido = ui.push_id(key, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let etiqueta = ui.allocate_ui_with_layout(
+                    Vec2::new(largura_categoria, altura),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_min_width(largura_categoria);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.add_space(if uso.is_some() { 4.0 } else { 10.0 });
+                        let etiqueta = ui.add(egui::Label::new(egui::RichText::new(nome).font(w::semibold(13.0)).color(c.ink)).truncate());
+                        if let Some((_, gasto, limite)) = uso {
+                            let pct = (gasto.saturating_mul(100) / limite).clamp(0, 999);
+                            let cor = if pct >= 100 { c.red } else if pct >= 80 { c.orange } else { c.green };
+                            ui.label(egui::RichText::new(format!("{pct}% usado")).font(w::regular(10.5)).color(cor));
+                        }
+                        etiqueta.id
+                    },
+                ).inner;
+                let largura_campo = ui.available_width() - largura_salvar - ui.spacing().item_spacing.x;
+                theme::campo_texto(ui, buf, "Sem limite", Vec2::new(largura_campo, altura), true)
+                    .labelled_by(etiqueta);
+                // Campo vazio ou zero remove o limite. Texto inválido mantém o valor salvo.
+                let cents = if buf.trim().is_empty() { Some(0) } else { flounder::model::parse_money(buf) };
+                let pode_salvar = cents.is_some_and(|valor| valor != atual);
+                let botao = egui::Button::new(egui::RichText::new("Salvar").font(w::semibold(12.0))
+                    .color(if pode_salvar { Color32::WHITE } else { c.muted }))
+                    .fill(if pode_salvar { c.blue } else { c.line }).corner_radius(10)
+                    .min_size(Vec2::new(largura_salvar, altura));
+                if ui.add_enabled(pode_salvar, botao).clicked() && let Some(cents) = cents {
                     salvar = Some((key, cents));
                 }
-                let largura_campo = ui.available_width();
-                // BTreeMap não tem IndexMut: pega o buffer por get_mut (criado acima).
-                let buf = bufs.get_mut(key).expect("buffer do orçamento criado acima");
-                ui.add_sized(
-                    [largura_campo, 32.0],
-                    egui::TextEdit::singleline(buf)
-                        .hint_text(egui::RichText::new("Sem orçamento").color(c.faint))
-                        .font(w::regular(13.0)),
-                );
-            });
-        });
-        // Uso do mês: % ao lado do rótulo, nas mesmas cores da Home (vermelho ≥ 100%).
-        if let Some((_, gasto, limite)) = uso
-            && *gasto > 0
-            && *limite > 0
-        {
-            let pct = (*gasto * 100 / *limite).clamp(0, 999);
-            let cor = if pct >= 100 {
-                c.red
-            } else if pct >= 80 {
-                c.orange
-            } else {
-                c.green
-            };
-            ui.label(egui::RichText::new(format!("{}% usado", pct)).font(w::regular(11.5)).color(cor));
+                cents.is_none()
+            }).inner
+        }).inner;
+        if invalido {
+            ui.label(egui::RichText::new("Informe um valor válido, como 120,00.").font(w::regular(11.5)).color(c.red));
         }
         ui.add_space(6.0);
     }
-    ui.ctx().data_mut(|d| d.insert_temp(id_bufs, bufs));
     if let Some((key, cents)) = salvar {
+        if let Some(buf) = bufs.get_mut(key) {
+            *buf = if cents > 0 { fmt_money(cents) } else { String::new() };
+        }
         // Otimista: espelha aqui; o worker recarrega o estado e o `aplicar` confirma.
         if cents > 0 {
             match app.budgets.iter_mut().find(|b| b.category == key) {
@@ -240,6 +243,7 @@ fn secao_orcamentos(ui: &mut Ui, app: &mut MobileApp, c: &Cores) {
         app.enviar(backend::Cmd::Budget(flounder::api::Budget { category: key.to_owned(), monthly_cents: cents }));
         app.atualizar_mes();
     }
+    ui.ctx().data_mut(|d| d.insert_temp(id_bufs, bufs));
 }
 
 /// Ações do assistente: auditoria do que o GLM executou no app (pede uma vez quando a

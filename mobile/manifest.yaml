@@ -7,8 +7,10 @@ android:
     sdk:
       min_sdk_version: 26
       target_sdk_version: 33
+    uses_permission:
+      - name: android.permission.INTERNET
     application:
       label: Flounder
-      theme: "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+      theme: "@android:style/Theme.DeviceDefault.Light.NoActionBar"
       has_code: false
   icon: assets/icon-512.png

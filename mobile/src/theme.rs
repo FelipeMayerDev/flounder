@@ -109,6 +109,37 @@ pub fn money(ui: &mut Ui, cents: i64, size: f32, cor: Color32) -> Response {
     ui.response()
 }
 
+pub fn money_inline(ui: &mut Ui, cents: i64, size: f32, cor: Color32) {
+    let texto = egui::RichText::new(flounder::model::money(cents)).font(w::semibold(size)).color(cor);
+    ui.add(egui::Label::new(texto).extend());
+}
+
+pub fn campo_texto(ui: &mut Ui, buf: &mut String, dica: &str, tamanho: Vec2, monetario: bool) -> Response {
+    let c = cores();
+    let margem = egui::Margin { left: if monetario { 30 } else { 10 }, right: 10, top: 6, bottom: 6 };
+    let resposta = ui.add_sized(tamanho, egui::TextEdit::singleline(buf)
+        .hint_text(egui::RichText::new(dica).color(c.muted))
+        .font(w::regular(14.0))
+        .margin(margem)
+        .horizontal_align(if monetario { Align::Max } else { Align::Min })
+        .vertical_align(Align::Center)
+        .desired_width(tamanho.x));
+    if monetario {
+        ui.painter().text(
+            pos2(resposta.rect.left() + 9.0, resposta.rect.center().y),
+            Align2::LEFT_CENTER, "R$", w::semibold(11.5), c.muted,
+        );
+    }
+    resposta
+}
+
+pub fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str, monetario: bool) {
+    let c = cores();
+    let etiqueta = ui.label(egui::RichText::new(rotulo).font(w::semibold(12.0)).color(c.muted));
+    campo_texto(ui, buf, dica, vec2(ui.available_width(), 42.0), monetario).labelled_by(etiqueta.id);
+    ui.add_space(6.0);
+}
+
 /// Chip de status ("Aberta").
 pub fn chip(ui: &mut Ui, texto: &str, fg: Color32, bg: Color32) -> Response {
     let g = ui.painter().layout_no_wrap(texto.to_owned(), w::semibold(12.0), fg);

@@ -6,7 +6,7 @@ use egui_phosphor::regular as icon;
 use flounder::widgets as w;
 
 use crate::app::{Filtro, MobileApp};
-use crate::mock::{self, MEMBROS};
+use crate::mock::MEMBROS;
 use crate::theme;
 
 pub fn show(ui: &mut Ui, app: &mut MobileApp) {
@@ -35,21 +35,19 @@ pub fn show(ui: &mut Ui, app: &mut MobileApp) {
         ui.add_space(12.0);
 
         segmentado(ui, app);
-        ui.add_space(10.0);
-        botao_editar(ui);
         ui.add_space(12.0);
 
         // Resumo da seção: muda com o filtro (Pagas mostra o total pago).
-        let (titulo, nota, total) = if app.filtro_casa == Filtro::Pagas {
-            ("Pagas", format!("{qtd_pagas} pagas · "), total_pagas)
-        } else {
-            ("A pagar", format!("{qtd_pend} pendentes · "), total_pend)
+        let (titulo, nota, total) = match app.filtro_casa {
+            Filtro::Todas => ("Todas as contas", format!("{qtd_pend} pendentes · "), total_pend),
+            Filtro::Pendentes => ("A pagar", format!("{qtd_pend} pendentes · "), total_pend),
+            Filtro::Pagas => ("Pagas", format!("{qtd_pagas} pagas · "), total_pagas),
         };
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(titulo).font(w::semibold(15.0)).color(c.ink));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Total inteiro à direita; a nota trunca com "…" em vez de quebrar a linha feio.
-                theme::money(ui, total, 13.0, c.ink);
+                theme::money_inline(ui, total, 14.0, c.ink);
                 ui.add(egui::Label::new(egui::RichText::new(nota).font(w::regular(13.0)).color(c.muted)).truncate());
             });
         });
@@ -115,6 +113,7 @@ fn secao_acertos(ui: &mut Ui, app: &mut MobileApp) {
     let mut acao_desfazer: Option<String> = None;
 
     theme::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.label(egui::RichText::new("Acertos").font(w::bold(16.0)).color(c.ink));
         ui.label(
             egui::RichText::new("Adiantamentos para equilibrar as contas")
@@ -163,7 +162,7 @@ fn secao_acertos(ui: &mut Ui, app: &mut MobileApp) {
                 .inner_margin(Margin::same(3))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let largura = ui.available_width() / 2.0;
+                        let largura = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
                         for (pos, nome) in [(0usize, nomes[0].clone()), (1usize, nomes[1].clone())] {
                             let on = est.de == pos;
                             let (rect, resp) = ui.allocate_exact_size(Vec2::new(largura, 32.0), Sense::click());
@@ -238,10 +237,10 @@ fn secao_acertos(ui: &mut Ui, app: &mut MobileApp) {
 
     // Efetiva as ações e grava o estado do formulário para o próximo frame.
     if let Some((valor, de)) = acao_salvar {
-        registrar_acerto(app, valor, de);
+        app.registrar_acerto(valor, de);
     }
     if let Some(id) = acao_desfazer {
-        desfazer_acerto(app, &id);
+        app.desfazer_acerto(id);
     }
     ui.ctx().data_mut(|d| d.insert_temp(id_estado, est));
 }
@@ -354,38 +353,6 @@ fn nomes_membros(app: &MobileApp) -> [String; 2] {
     nomes
 }
 
-/// Registra o acerto. Na demonstração grava direto na view-model (o `atualizar_mes` do
-/// método recriaria o mock e descartaria o acerto — mesmo padrão do clique na bolinha de
-/// pago). Na sessão real, grava no `data` e no backend via `MobileApp::registrar_acerto`.
-fn registrar_acerto(app: &mut MobileApp, valor_cents: i64, de: usize) {
-    if app.demo {
-        app.dados.casa.saldo_acerto += if de == 0 { valor_cents } else { -valor_cents };
-        app.dados.casa.acertos.push(mock::Acerto {
-            id: format!("local-demo-{}", app.dados.casa.acertos.len()),
-            de,
-            valor_cents,
-            dia: flounder::model::today().d as u8,
-            mes: app.m,
-            ano: app.y,
-        });
-        return;
-    }
-    app.registrar_acerto(valor_cents, de);
-}
-
-/// Desfaz um acerto pelo id. Na demonstração devolve o saldo e tira só o acerto da lista
-/// (o método recriaria o mock e zeraria a lista inteira). Na real, `MobileApp::desfazer_acerto`.
-fn desfazer_acerto(app: &mut MobileApp, id: &str) {
-    if app.demo {
-        if let Some(a) = app.dados.casa.acertos.iter().find(|a| a.id == id) {
-            app.dados.casa.saldo_acerto -= if a.de == 0 { a.valor_cents } else { -a.valor_cents };
-        }
-        app.dados.casa.acertos.retain(|a| a.id != id);
-        return;
-    }
-    app.desfazer_acerto(id.to_owned());
-}
-
 // ─── Contas da casa (como antes) ─────────────────────────────────────────────────
 
 /// Controle segmentado Todas | Pendentes | Pagas: fundo cinza, pílula branca no ativo.
@@ -397,7 +364,7 @@ fn segmentado(ui: &mut Ui, app: &mut MobileApp) {
         .inner_margin(Margin::same(3))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let largura = ui.available_width() / 3.0;
+                let largura = (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0;
                 for (filtro, rotulo) in [
                     (Filtro::Todas, "Todas"),
                     (Filtro::Pendentes, "Pendentes"),
@@ -420,25 +387,6 @@ fn segmentado(ui: &mut Ui, app: &mut MobileApp) {
         });
 }
 
-/// Botão "Editar lista": pílula branca com borda fina (estático na fase 1).
-fn botao_editar(ui: &mut Ui) {
-    let c = theme::cores();
-    let resp = Frame::new()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0, c.line))
-        .corner_radius(255)
-        .inner_margin(Margin::symmetric(14, 8))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(format!("{}  Editar lista", icon::PENCIL_SIMPLE))
-                    .font(w::semibold(13.0))
-                    .color(c.ink),
-            );
-        })
-        .response;
-    let _ = resp; // clique sem ação por enquanto
-}
-
 /// Uma conta da casa: bolinha de pago, nome + valor, pagador/dia e a sua parte.
 fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
     let c = theme::cores();
@@ -452,7 +400,11 @@ fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
     let nome_pagador = if pagador == app.eu { "Você" } else { nome_membro };
     let inicial = nome_membro.chars().next().unwrap();
 
-    ui.horizontal(|ui| {
+    let altura_linha = 24.0;
+    let altura_detalhes = 18.0;
+    let espaco_entre_linhas = 3.0;
+    let altura_item = altura_linha + espaco_entre_linhas + altura_detalhes;
+    ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), altura_item), Layout::left_to_right(Align::Center), |ui| {
         // Bolinha de pago: clique alterna e o resumo recalcula no próximo frame.
         let resp = theme::bolinha_check(ui, paga, c.green);
         if resp.clicked() {
@@ -471,43 +423,47 @@ fn linha_conta(ui: &mut Ui, app: &mut MobileApp, idx: usize) {
         }
         ui.add_space(6.0);
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = espaco_entre_linhas;
             // Linha 1: nome (mudo quando paga) e valor (≈ antes se aproximado).
             // O valor fica sempre inteiro à direita; o nome encolhe com "…" em nomes longos.
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    theme::money(ui, total, 14.0, c.ink);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), altura_linha),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    theme::money_inline(ui, total, 14.0, c.ink);
                     if aprox {
                         ui.label(egui::RichText::new("≈").font(w::semibold(13.0)).color(c.muted));
                     }
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&nome)
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), altura_linha),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(&nome)
                                 .font(w::semibold(14.0))
-                                .color(if paga { c.muted } else { c.ink }),
-                        )
-                        .truncate(),
+                                .color(if paga { c.muted } else { c.ink })).truncate());
+                        },
                     );
-                });
-            });
-            ui.add_space(3.0);
+                },
+            );
             // Linha 2: dot do pagador, "quem · dia" e a sua parte à direita.
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                theme::avatar(ui, rect.center(), 9.0, &inicial.to_string(), cor_pagador);
-                ui.add_space(6.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    theme::money(ui, parte, 12.0, c.muted);
-                    ui.label(egui::RichText::new("sua parte").font(w::regular(12.0)).color(c.faint));
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{nome_pagador} · dia {dia}"))
-                                .font(w::regular(12.0))
-                                .color(c.muted),
-                        )
-                        .truncate(),
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), altura_detalhes),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    theme::money_inline(ui, parte, 12.0, c.muted);
+                    ui.label(egui::RichText::new("Sua parte").font(w::regular(12.0)).color(c.muted));
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), altura_detalhes),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(altura_detalhes), Sense::hover());
+                            theme::avatar(ui, rect.center(), 8.0, &inicial.to_string(), cor_pagador);
+                            ui.add(egui::Label::new(egui::RichText::new(format!("{nome_pagador} · dia {dia}"))
+                                .font(w::regular(12.0)).color(c.muted)).truncate());
+                        },
                     );
-                });
-            });
+                },
+            );
         });
     });
 }

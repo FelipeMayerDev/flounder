@@ -1,60 +1,55 @@
 //! Tela Cartões — total das faturas do mês e um bloco por cartão de crédito:
-//! fatura do mês com bolinha de pago (toque alterna), as compras do mês, o fechamento
+//! fatura do mês com status de pagamento, as compras do mês, o fechamento
 //! do ciclo (chip abre o ajuste no modo real) e a fatura em formação ("Próxima fatura").
 
-use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Vec2, pos2};
+use egui::{Align, Align2, Color32, Frame, Layout, Margin, Sense, Vec2};
 use egui_phosphor::regular as icon;
 use flounder::model::{Kind, Month};
 use flounder::widgets as w;
 
-use crate::app::{fmt_money, MobileApp};
+use crate::app::MobileApp;
 use crate::converter;
 use crate::mock;
-use crate::screens::home::truncar;
 use crate::theme::{self, Cores};
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let c = theme::cores();
-    // Mês por extenso em minúsculas ("dezembro") e abreviado ("dez") para os subtítulos.
-    let mes = app.mes_label().split_whitespace().next().unwrap_or("").to_lowercase();
-    let mes_abr = mes.get(..3).unwrap_or(&mes).to_owned();
+    let mes = Month { y: app.y, m: app.m.into() };
 
-    // Resumo do mês: total das faturas + ilustração.
     let total = app.dados.cartoes.total_faturas_cents;
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                theme::money(ui, total, 28.0, c.ink);
                 ui.label(
-                    egui::RichText::new(format!("total das faturas que vencem em {mes}"))
-                        .font(w::regular(13.0))
-                        .color(c.muted),
+                    egui::RichText::new("Total das faturas").font(w::semibold(13.0)).color(c.muted),
                 );
+                theme::money_inline(ui, total, 28.0, c.ink);
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                w::art(ui, w::Art::Card, 46.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
+                ui.painter().rect_filled(rect, 14.0, c.blue_soft);
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::CREDIT_CARD, w::regular(23.0), c.blue);
             });
         });
     });
 
-    // Dados de cada cartão (fatura e compras do mês) copiados ANTES do desenho: os toques
-    // (bolinha de pago, chip do fechamento) agem depois, com &mut app — nada emprestado
-    // de app.dados pendura.
     let linhas = linhas(app);
+    if linhas.is_empty() {
+        theme::vazio(ui, icon::CREDIT_CARD, "Nenhum cartão neste mês.");
+        return;
+    }
     let mut tocada = None;
     let mut fecho = None;
-    for linha in &linhas {
-        match item(ui, linha, &mes_abr, &mes, &c) {
+    for (i, linha) in linhas.iter().enumerate() {
+        let toque = ui.push_id((i, &linha.banco), |ui| item(ui, linha, mes, &c)).inner;
+        match toque {
             Some(Toque::Pago { card, due }) => tocada = Some((card, due)),
             Some(Toque::Fechamento(id)) => fecho = Some(id),
             None => {}
         }
     }
     if let Some((card, due)) = tocada {
-        // Alterna no espelho e grava via worker; recalcula a view-model dos cartões
-        // APÓS o alternar_pago (atualizar_mes é &mut self) e fora dos blocos de desenho.
         app.alternar_pago(&mock::Acao::Fatura { card, due });
-        app.atualizar_mes();
     }
     if let Some(card) = fecho {
         // Folha de ajuste do fechamento: começa com o dia atual do cartão conectado.
@@ -66,23 +61,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
                 tried: false,
             }));
         }
-    }
-
-    // Adicionar cartão novo: só na demonstração (cartões reais chegam da Pluggy).
-    if app.demo && ui
-        .add_sized(
-            [ui.available_width(), 56.0],
-            egui::Button::new(
-                egui::RichText::new(format!("{}  Adicionar cartão", icon::PLUS))
-                    .font(w::semibold(15.0))
-                    .color(c.blue),
-            )
-            .fill(c.blue_soft)
-            .corner_radius(22),
-        )
-        .clicked()
-    {
-        app.sheet = Some(crate::app::Sheet::Cartao(crate::app::SheetCartao::default()));
     }
 }
 
@@ -220,212 +198,147 @@ fn linhas(app: &MobileApp) -> Vec<Linha> {
         .collect()
 }
 
-/// Cartão de um banco: faixa colorida, header, fatura (com bolinha de pago), fechamento
-/// do ciclo, compras do mês, fatura em formação e limite disponível. Devolve o toque
-/// (bolinha de pago ou chip do fechamento), aplicado fora dos blocos de desenho.
-fn item(ui: &mut egui::Ui, linha: &Linha, mes_abr: &str, mes: &str, c: &Cores) -> Option<Toque> {
+/// Resumo do cartão e detalhes da fatura.
+fn item(ui: &mut egui::Ui, linha: &Linha, mes: Month, c: &Cores) -> Option<Toque> {
     let mut tocada = None;
     theme::card(ui, |ui| {
-        // Faixa fina da cor do banco, colada no topo do conteúdo.
-        let topo = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(
-            Rect::from_min_size(topo.min, Vec2::new(topo.width(), 4.0)),
-            CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 },
-            linha.cor,
-        );
-        ui.add_space(8.0);
-
-        // Marca d'água do banco: logo grande e translúcido no fundo do bloco (lado direito).
-        if let Some(key) = w::logo_key(&linha.banco)
-            && let Some(logo) = w::logo_textura(key, false)
-            && logo.size()[0] > 0
-        {
-            let altura = 110.0;
-            let largura = altura * logo.size()[0] as f32 / logo.size()[1] as f32;
-            let marca = Rect::from_min_size(
-                pos2(topo.right() - largura - 12.0, topo.min.y + 14.0),
-                Vec2::new(largura, altura),
-            );
-            ui.painter().image(logo.id(), marca, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(70));
-        }
-
-        // Header: bolinha com a inicial, nome do banco, chip de status e caret.
+        ui.set_min_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+            let (marca, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
             let inicial = linha.banco.chars().next().unwrap_or('?').to_string();
-            theme::avatar(ui, rect.center(), 13.0, &inicial, linha.cor);
-            // Nome truncado ("…") para nunca invadir o chip de status.
-            let largura_nome = (ui.available_width() - 130.0).max(60.0);
-            let fonte_nome = w::semibold(15.0);
-            let nome = truncar(&linha.banco, fonte_nome.clone(), c.ink, ui, largura_nome);
-            ui.label(egui::RichText::new(nome).font(fonte_nome).color(c.ink));
+            theme::avatar(ui, marca.center(), 18.0, &inicial, linha.cor);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(egui::RichText::new(icon::CARET_RIGHT).font(w::regular(16.0)).color(c.muted));
-                // Chip padronizado: Paga (fatura paga), Aberta (fatura do mês em aberto)
-                // ou Sem fatura (não há fatura neste mês — só o saldo utilizado).
                 if linha.paga {
                     theme::chip(ui, "Paga", c.green, c.green_soft);
                 } else if linha.aberta {
-                    theme::chip(ui, "Aberta", c.blue, c.blue_soft);
+                    theme::chip(ui, "Em aberto", c.blue, c.blue_soft);
                 } else {
                     theme::chip(ui, "Sem fatura", c.muted, c.line);
                 }
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), marca.height()),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(&linha.banco).font(w::bold(16.0)).color(c.ink),
+                        ).truncate());
+                    },
+                );
             });
         });
-        ui.add_space(2.0);
+        ui.add_space(6.0);
 
-        // Prazo: coerente com o chip (a abreviação do mês vem da navegação, não do label).
-        // 0 dias com fechamento informado = fecha hoje (regra do núcleo `days_to_closing`).
-        let prazo = if linha.paga {
-            format!("fechada · vence {} {mes_abr}", linha.vence_dia)
-        } else if linha.aberta {
-            format!("{} · vence {} {mes_abr}", converter::prazo_fechamento(linha.fecha_dias, linha.fechamento_dia), linha.vence_dia)
-        } else {
-            format!("sem fatura neste mês · vence {} {mes_abr}", linha.vence_dia)
-        };
-        ui.label(egui::RichText::new(prazo).font(w::regular(12.0)).color(c.muted));
-        ui.add_space(2.0);
-
-        // Fechamento do ciclo: no modo real, o chip abre a folha de ajuste; na
-        // demonstração (cartão sem id), só o texto miúdo informativo.
         ui.horizontal(|ui| {
-            if linha.id.is_some() {
+            ui.label(egui::RichText::new(&linha.fatura_label).font(w::regular(13.0)).color(c.muted));
+            if let Some(fatura) = &linha.fatura {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if chip_fechamento(ui, linha, c) {
-                        tocada = Some(Toque::Fechamento(linha.id.clone().unwrap_or_default()));
-                    }
-                });
-            } else {
-                let rotulo = match linha.fechamento_dia {
-                    Some(d) => format!("Fecha dia {d}"),
-                    None => "Sem fechamento informado".to_owned(),
-                };
-                ui.label(egui::RichText::new(rotulo).font(w::regular(12.0)).color(c.faint));
-            }
-        });
-        ui.add_space(8.0);
-
-        // Fatura do mês: bolinha de pago ao lado do rótulo (só quando há fatura conectada;
-        // sem fatura no mês não há o que alternar — o chip "Sem fatura" já diz).
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(linha.fatura_label.as_str()).font(w::regular(13.0)).color(c.muted));
-            if let Some(f) = &linha.fatura {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if theme::bolinha_check(ui, f.paga, c.green).clicked() {
-                        tocada = Some(Toque::Pago { card: f.card.clone(), due: f.due.clone() });
+                    let rotulo = if fatura.paga { "Desmarcar pagamento" } else { "Marcar como paga" };
+                    if ui.add(egui::Button::new(rotulo).min_size(Vec2::new(0.0, 36.0))).clicked() {
+                        tocada = Some(Toque::Pago { card: fatura.card.clone(), due: fatura.due.clone() });
                     }
                 });
             }
         });
-        ui.add_space(2.0);
-        theme::money(ui, linha.total_cents, 26.0, c.ink);
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(format!("{} compras", linha.compras))
-                .font(w::regular(13.0))
-                .color(c.muted),
-        );
-        ui.add_space(12.0);
-
-        // Disponível: verde acima de 50% do limite, senão laranja.
-        let cor_disp = if linha.limite_cents > 0 && linha.disponivel_cents * 2 > linha.limite_cents {
-            c.green
-        } else {
-            c.orange
-        };
-        ui.horizontal(|ui| {
-            theme::money(ui, linha.disponivel_cents, 14.0, cor_disp);
-            ui.label(
-                egui::RichText::new(format!(" de R$ {}", fmt_money(linha.limite_cents)))
-                    .font(w::regular(13.0))
-                    .color(c.muted),
-            );
-        });
-        ui.add_space(8.0);
-        let frac = if linha.limite_cents > 0 {
-            linha.disponivel_cents as f32 / linha.limite_cents as f32
-        } else {
-            0.0
-        };
-        theme::barra(ui, frac, cor_disp, 8.0);
-
-        // Compras do mês neste cartão: descrição + categoria/dia, valor à direita.
-        ui.add_space(14.0);
-        divisoria(ui);
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(format!("Compras de {mes}"))
-                .font(w::semibold(13.0))
-                .color(c.ink),
-        );
-        ui.add_space(4.0);
-        if linha.compras_mes.is_empty() {
-            ui.label(
-                egui::RichText::new("Nenhuma compra neste mês.")
-                    .font(w::regular(12.0))
-                    .color(c.faint),
-            );
-        } else {
-            for (n, comp) in linha.compras_mes.iter().enumerate() {
-                if n > 0 {
-                    ui.add_space(7.0);
-                    divisoria(ui);
+        theme::money_inline(ui, linha.total_cents, 24.0, c.ink);
+        ui.horizontal_wrapped(|ui| {
+            if linha.paga || linha.aberta {
+                let mes_abr = mes.name()[..3].to_lowercase();
+                ui.label(egui::RichText::new(format!("Vencimento: {} {mes_abr}", linha.vence_dia))
+                    .font(w::regular(12.0)).color(c.muted));
+            }
+            if let Some(id) = &linha.id {
+                if chip_fechamento(ui, linha, c) {
+                    tocada = Some(Toque::Fechamento(id.clone()));
                 }
-                linha_compra(ui, comp, c);
+            } else if let Some(dia) = linha.fechamento_dia {
+                ui.label(egui::RichText::new(format!("Fecha dia {dia}")).font(w::regular(12.0)).color(c.muted));
             }
-        }
+        });
+        ui.add_space(6.0);
 
-        // Fatura em formação: o que veio no/do dia do fechamento em diante já cai na
-        // fatura seguinte (o desktop mostra o mesmo bloco, "Depois do fechamento").
-        if linha.proximo_qtd > 0 || linha.fechamento_dia.is_some() {
-            ui.add_space(14.0);
-            divisoria(ui);
-            ui.add_space(8.0);
-            if linha.proximo_qtd > 0 {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Próxima fatura").font(w::semibold(13.0)).color(c.ink));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{} compras", linha.proximo_qtd))
-                                .font(w::regular(13.0))
-                                .color(c.muted),
-                        );
-                        theme::money(ui, linha.proximo_total_cents, 13.0, c.ink);
-                    });
-                });
-            } else {
-                ui.label(
-                    egui::RichText::new("Nada após o fechamento.")
-                        .font(w::regular(12.0))
-                        .color(c.faint),
-                );
-            }
+        if linha.limite_cents > 0 || linha.disponivel_cents != 0 {
+            limite(ui, linha, c);
         }
-
-        // Próximos vencimentos projetados ("dez 26 · R$ 620,00"), logo abaixo da fatura
-        // em formação: as janelas de fechamento dos meses seguintes já com compras.
-        if !linha.proximas.is_empty() {
-            ui.add_space(14.0);
-            divisoria(ui);
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Próximos vencimentos")
-                    .font(w::semibold(13.0))
-                    .color(c.ink),
-            );
-            ui.add_space(4.0);
-            for (mes_label, total) in &linha.proximas {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(mes_label.as_str()).font(w::regular(12.5)).color(c.muted));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        theme::money(ui, *total, 12.5, c.muted);
-                    });
-                });
-                ui.add_space(4.0);
-            }
-        }
+        compras(ui, linha, c);
+        proximas(ui, linha, mes, c);
     });
     tocada
+}
+
+fn limite(ui: &mut egui::Ui, linha: &Linha, c: &Cores) {
+    Frame::new().fill(c.line).corner_radius(14).inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            linha_valor(ui, "Limite disponível", linha.disponivel_cents, c.muted, c.ink);
+            if linha.limite_cents <= 0 {
+                return;
+            }
+            let frac = linha.disponivel_cents as f32 / linha.limite_cents as f32;
+            let cor = if frac > 0.5 { c.green } else { c.orange };
+            ui.label(egui::RichText::new(format!("Limite total: {}", flounder::model::money(linha.limite_cents)))
+                .font(w::regular(12.0)).color(c.muted));
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3.0, c.card);
+            let disponivel = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac.clamp(0.0, 1.0), rect.height()));
+            ui.painter().rect_filled(disponivel, 3.0, cor);
+        });
+}
+
+fn quantidade_compras(quantidade: usize) -> String {
+    if quantidade == 1 { "1 compra".into() } else { format!("{quantidade} compras") }
+}
+
+fn compras(ui: &mut egui::Ui, linha: &Linha, c: &Cores) {
+    let quantidade = (linha.compras as usize).max(linha.compras_mes.len());
+    if quantidade == 0 {
+        return;
+    }
+    ui.add_space(4.0);
+    let titulo = egui::RichText::new(quantidade_compras(quantidade)).font(w::semibold(13.0)).color(c.ink);
+    if linha.compras_mes.is_empty() {
+        ui.label(titulo);
+        ui.label(egui::RichText::new("Detalhes das compras indisponíveis.").font(w::regular(12.0)).color(c.muted));
+        return;
+    }
+    egui::CollapsingHeader::new(titulo).id_salt("compras").show_unindented(ui, |ui| {
+        if linha.compras_mes.len() < quantidade {
+            ui.label(egui::RichText::new(format!("Detalhes de {} de {quantidade} compras", linha.compras_mes.len()))
+                .font(w::regular(12.0)).color(c.muted));
+        }
+        for comp in &linha.compras_mes {
+            linha_valor(ui, &comp.desc, comp.centavos, c.ink, if comp.centavos >= 0 { c.green } else { c.ink });
+            ui.label(egui::RichText::new(&comp.nota).font(w::regular(11.5)).color(c.muted));
+        }
+    });
+}
+
+fn proximas(ui: &mut egui::Ui, linha: &Linha, mes: Month, c: &Cores) {
+    if linha.proximo_qtd == 0 && linha.proximas.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.separator();
+    ui.label(egui::RichText::new("Próximas faturas").font(w::semibold(13.0)).color(c.ink));
+    let mes_seguinte = mes.add(1).short().to_lowercase();
+    let em_formacao = linha.proximo_qtd > 0;
+    let mesma_fatura = em_formacao
+        && linha.proximas.first().is_some_and(|(mes, total)| mes == &mes_seguinte && *total == linha.proximo_total_cents);
+    if em_formacao {
+        let rotulo = if mesma_fatura { &mes_seguinte } else { "Em formação" };
+        let rotulo = format!("{rotulo} · {}", quantidade_compras(linha.proximo_qtd as usize));
+        linha_valor(ui, &rotulo, linha.proximo_total_cents, c.muted, c.ink);
+    }
+    for (mes, total) in linha.proximas.iter().skip(usize::from(mesma_fatura)) {
+        linha_valor(ui, mes, *total, c.muted, c.ink);
+    }
+}
+
+fn linha_valor(ui: &mut egui::Ui, rotulo: &str, centavos: i64, cor_rotulo: Color32, cor_valor: Color32) {
+    ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 22.0), Layout::right_to_left(Align::Center), |ui| {
+        theme::money_inline(ui, centavos, 13.0, cor_valor);
+        ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 22.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(rotulo).font(w::regular(13.0)).color(cor_rotulo)).truncate());
+        });
+    });
 }
 
 /// Chip clicável do fechamento ("Fechamento dia 20 ⚙"): abre a folha de ajuste.
@@ -446,36 +359,4 @@ fn chip_fechamento(ui: &mut egui::Ui, linha: &Linha, c: &Cores) -> bool {
             .corner_radius(255),
     )
     .clicked()
-}
-
-/// Uma compra do mês: descrição (trunca com "…") com a nota miudinha ao lado e o valor
-/// inteiro à direita. Despesa em ink com o −; estorno/receita em verde.
-fn linha_compra(ui: &mut egui::Ui, comp: &Compra, c: &Cores) {
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        &comp.desc,
-        0.0,
-        egui::TextFormat { font_id: w::semibold(13.0), color: c.ink, valign: Align::BOTTOM, ..Default::default() },
-    );
-    if !comp.nota.is_empty() {
-        job.append(
-            &format!("· {}", comp.nota),
-            6.0,
-            egui::TextFormat { font_id: w::regular(11.0), color: c.faint, valign: Align::BOTTOM, ..Default::default() },
-        );
-    }
-    ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let cor = if comp.centavos >= 0 { c.green } else { c.ink };
-            theme::money(ui, comp.centavos, 13.0, cor);
-            ui.add(egui::Label::new(job).truncate());
-        });
-    });
-}
-
-/// Divisória fininha da lista de compras.
-fn divisoria(ui: &mut egui::Ui) {
-    let c = theme::cores();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, c.line);
 }

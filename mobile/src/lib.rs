@@ -16,17 +16,17 @@ pub fn criar(cc: &eframe::CreationContext<'_>) -> Box<dyn eframe::App> {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
-    use winit::platform::android::EventLoopBuilderExtAndroid;
     // unsafe: antes de qualquer thread nascer, no entry do NativeActivity.
     unsafe { std::env::set_var("RUST_BACKTRACE", "1"); }
-    let mut options = eframe::NativeOptions {
+    let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("Flounder"),
+        android_app: Some(android_app.clone()),
         ..Default::default()
     };
-    let app = android_app.clone();
-    options.event_loop_builder = Some(Box::new(move |builder| {
-        builder.with_android_app(app.clone());
-    }));
-    eframe::run_native("Flounder", options, Box::new(|cc| Ok(criar(cc))))
-        .expect("Flounder não abriu no Android");
+    eframe::run_native("Flounder", options, Box::new(move |cc| {
+        flounder::widgets::install(&cc.egui_ctx);
+        let mut app = app::MobileApp::load(cc.storage);
+        app.android_app = Some(android_app);
+        Ok(Box::new(app))
+    })).expect("Flounder não abriu no Android");
 }

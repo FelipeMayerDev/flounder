@@ -14,6 +14,18 @@ use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
     let c = theme::cores();
+    if app.demo {
+        theme::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new("Consultor").font(w::bold(16.0)).color(c.ink));
+            w::caption(ui, "Conecte sua conta para conversar sobre seus gastos e gerar análises.");
+            ui.add_space(10.0);
+            if w::primary_button(ui, "Conectar conta").clicked() {
+                app.demo = false;
+            }
+        });
+        return;
+    }
     let (nome, outro) = (nome_membro(app, app.eu), nome_membro(app, 1 - app.eu));
     let tab = app.agent.tab;
     let ocupado = app.agent.waiting_analysis || app.agent.reports.as_ref().is_some_and(|r| r.busy);
@@ -73,11 +85,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut MobileApp) {
             (Tab::Couple, format!("{} e {}", nome, outro)),
         ];
         ui.horizontal(|ui| {
+            let largura = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             for (aba, rotulo) in &opcoes {
                 let on = tab == *aba;
                 if ui
                     .add_sized(
-                        [ui.available_width() / 2.0 - 4.0, 32.0],
+                        [largura, 36.0],
                         egui::Button::new(
                             egui::RichText::new(rotulo.clone())
                                 .font(w::semibold(12.0))

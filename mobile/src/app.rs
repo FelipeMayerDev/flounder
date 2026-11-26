@@ -1,11 +1,12 @@
-//! Casca do Flounder mobile: topo, barra do mês, tab bar flutuante, FAB, telas e a sessão
+//! Casca do Flounder mobile: topo, barra do mês, navegação, telas e a sessão
 //! real com o backend (worker do desktop + pareamento por código; fase 1 vira demonstração).
 
-use egui::{Align, Align2, Color32, Frame, Layout, Ui, Vec2, pos2};
+use egui::{Align, Align2, Color32, Frame, Layout, Ui, Vec2};
 use flounder::backend::{self, PairMsg, Worker};
 use flounder::model::{BillRef, Data, Kind, Month, Person};
 use flounder::widgets as w;
 use egui_phosphor::regular as icon;
+use std::collections::BTreeMap;
 use std::sync::mpsc::Receiver;
 
 use crate::converter;
@@ -36,16 +37,6 @@ pub struct SheetEntrada {
     pub tried: bool,
 }
 
-/// Folha de novo cartão (aba Cartões, só na demonstração: cartões reais vêm da Pluggy).
-#[derive(Clone, Default)]
-pub struct SheetCartao {
-    pub banco: String,
-    pub limite: String,
-    pub venc: String,
-    pub fecha: String,
-    pub tried: bool,
-}
-
 /// Folha do fechamento de um cartão conectado (aba Cartões, modo real).
 #[derive(Clone, Default)]
 pub struct FolhaFechamento {
@@ -61,7 +52,6 @@ pub struct FolhaFechamento {
 pub enum Sheet {
     /// Novo lançamento completo — UI e estado em `screens/lancamento.rs`.
     Lancamento(crate::screens::lancamento::Folha),
-    Cartao(SheetCartao),
     /// Ajuste do dia de fechamento de um cartão conectado.
     Fechamento(FolhaFechamento),
     /// Ajustes (menu ☰): quem usa o celular, versão.
@@ -81,6 +71,8 @@ pub struct Conexao {
 }
 
 pub struct MobileApp {
+    #[cfg(target_os = "android")]
+    pub(crate) android_app: Option<winit::platform::android::activity::AndroidApp>,
     pub y: i32,
     pub m: u8,
     pub tab: Tab,
@@ -89,6 +81,7 @@ pub struct MobileApp {
     pub filtro_casa: Filtro,
     /// View-model das telas: convertida do `data` real ou do mock (demonstração).
     pub dados: mock::Mes,
+    pub meses_demo: BTreeMap<Month, mock::Mes>,
     pub sheet: Option<Sheet>,
     /// Modo demonstração: dados do mock, nada gravado.
     pub demo: bool,
@@ -147,6 +140,8 @@ impl MobileApp {
         });
         let hoje = flounder::model::today();
         MobileApp {
+            #[cfg(target_os = "android")]
+            android_app: None,
             y: hoje.y,
             m: hoje.m as u8,
             // FLOUNDER_TAB=<aba> abre direto na aba (útil para testar a janela real).
@@ -160,6 +155,7 @@ impl MobileApp {
             eu: 0,
             filtro_casa: Filtro::Todas,
             dados: mock::para(hoje.y, hoje.m as u8),
+            meses_demo: BTreeMap::new(),
             sheet: None,
             connected_cards: None,
             connected_invoices: Vec::new(),
@@ -203,9 +199,16 @@ impl MobileApp {
     pub fn salvar_entrada(&mut self, entrada: flounder::model::Entry) {
         if self.demo {
             let dia = entrada.date.d;
+            let id = if entrada.id == 0 {
+                self.dados.fluxo.iter().flat_map(|d| &d.entradas).map(|e| e.id).max().unwrap_or(0) + 1
+            } else {
+                self.dados.remover_lancamento(entrada.id);
+                entrada.id
+            };
             let mock_e = mock::Entrada {
-                id: 0,
+                id,
                 desc: entrada.desc.clone(),
+                categoria: entrada.category,
                 centavos: if entrada.kind == Kind::Income { entrada.amount } else { -entrada.amount },
                 membro: entrada.owner.idx(),
                 shared: entrada.shared,
@@ -214,12 +217,12 @@ impl MobileApp {
                 }),
                 paid: entrada.paid,
             };
+            self.dados.ajustar_fluxo(mock_e.centavos, 1);
             match self.dados.fluxo.iter_mut().find(|d| d.dia == dia as u8) {
                 Some(d) => d.entradas.push(mock_e),
                 None => self.dados.fluxo.push(mock::DiaFluxo { dia: dia as u8, entradas: vec![mock_e] }),
             }
             self.dados.fluxo.sort_by_key(|d| d.dia);
-            self.atualizar_mes();
             return;
         }
         let id = self.data.upsert(entrada);
@@ -259,11 +262,7 @@ impl MobileApp {
     /// Exclui um lançamento e grava via worker.
     pub fn excluir_entrada(&mut self, id: u32) {
         if self.demo {
-            for d in &mut self.dados.fluxo {
-                d.entradas.retain(|e| e.id != id);
-            }
-            self.dados.fluxo.retain(|d| !d.entradas.is_empty());
-            self.atualizar_mes();
+            self.dados.remover_lancamento(id);
             return;
         }
         self.data.entries.retain(|e| e.id != id);
@@ -299,15 +298,17 @@ impl MobileApp {
     pub fn registrar_acerto(&mut self, valor_cents: i64, de: usize) {
         if self.demo {
             self.dados.casa.saldo_acerto += if de == 0 { valor_cents } else { -valor_cents };
+            let proximo = self.dados.casa.acertos.iter()
+                .filter_map(|a| a.id.strip_prefix("local-demo-")?.parse::<u32>().ok())
+                .max().unwrap_or(0) + 1;
             self.dados.casa.acertos.push(mock::Acerto {
-                id: format!("local-demo-{}", self.dados.casa.acertos.len()),
+                id: format!("local-demo-{proximo}"),
                 de,
                 valor_cents,
                 dia: flounder::model::today().d as u8,
                 mes: self.m,
                 ano: self.y,
             });
-            self.atualizar_mes();
             return;
         }
         let hoje = flounder::model::today();
@@ -321,8 +322,10 @@ impl MobileApp {
     /// Desfaz um acerto pelo id e grava via worker.
     pub fn desfazer_acerto(&mut self, id: String) {
         if self.demo {
-            self.dados.casa.acertos.retain(|a| a.id != id);
-            self.atualizar_mes();
+            if let Some(pos) = self.dados.casa.acertos.iter().position(|a| a.id == id) {
+                let acerto = self.dados.casa.acertos.remove(pos);
+                self.dados.casa.saldo_acerto -= if acerto.de == 0 { acerto.valor_cents } else { -acerto.valor_cents };
+            }
             return;
         }
         self.data.settlements.retain(|a| a.id != id);
@@ -335,7 +338,6 @@ impl MobileApp {
         if self.demo {
             self.eu = if client == "client-2" { 1 } else { 0 };
             self.data.me = if client == "client-2" { Person::B } else { Person::A };
-            self.atualizar_mes();
             return true;
         }
         let Some(cx) = self.sessao.as_mut() else { return false };
@@ -363,14 +365,19 @@ impl MobileApp {
 
     /// Navega de mês; o worker continua de olho no backend e a view-model se recalcula.
     pub fn andar_mes(&mut self, delta: i32) {
-        self.m = ((self.m as i32 - 1 + delta).rem_euclid(12) + 1) as u8;
-        if delta < 0 && self.m == 12 {
-            self.y -= 1;
+        if delta == 0 {
+            return;
         }
-        if delta > 0 && self.m == 1 {
-            self.y += 1;
+        let atual = Month { y: self.y, m: self.m.into() };
+        let novo = atual.add(delta);
+        self.y = novo.y;
+        self.m = novo.m as u8;
+        if self.demo {
+            let dados = self.meses_demo.remove(&novo).unwrap_or_else(|| mock::para(self.y, self.m));
+            self.meses_demo.insert(atual, std::mem::replace(&mut self.dados, dados));
+        } else {
+            self.atualizar_mes();
         }
-        self.atualizar_mes();
     }
 
     pub fn mes_label(&self) -> String {
@@ -525,10 +532,10 @@ pub fn update(app: &mut MobileApp, ui: &mut Ui) {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     (app.y, app.m, std::mem::discriminant(&app.tab)).hash(&mut hash);
     flounder::widgets::begin_frame(ui.ctx(), hash.finish());
-    topo(ui, app);
     // Estados: pareamento (sem credencial) → conectando (sessão sem carga) → conteúdo.
     let pareando = app.sessao.is_none() && !app.demo;
     let carregando = !pareando && !app.demo && !app.sessao.as_ref().is_some_and(|c| c.loaded);
+    topo(ui, app, !pareando);
     if !pareando {
         tabbar(ui, app);
     }
@@ -543,19 +550,21 @@ pub fn update(app: &mut MobileApp, ui: &mut Ui) {
             }
             mes_barra(ui, app);
             ui.add_space(12.0);
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                if app.dados.vazio {
-                    theme::vazio(ui, "🐟", &format!("Nada por aqui em {}.", app.mes_label()));
-                    return;
-                }
-                match app.tab {
-                    Tab::Inicio => crate::screens::home::show(ui, app),
-                    Tab::Fluxo => crate::screens::flow::show(ui, app),
-                    Tab::Cartoes => crate::screens::cards::show(ui, app),
-                    Tab::Casa => crate::screens::house::show(ui, app),
-                    Tab::Consultor => crate::screens::consultor::show(ui, app),
-                }
-            });
+            egui::ScrollArea::vertical()
+                .id_salt((std::mem::discriminant(&app.tab), app.y, app.m))
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    match app.tab {
+                        Tab::Inicio if app.dados.vazio => {
+                            theme::vazio(ui, "🐟", &format!("Nada por aqui em {}.", app.mes_label()));
+                        }
+                        Tab::Inicio => crate::screens::home::show(ui, app),
+                        Tab::Fluxo => crate::screens::flow::show(ui, app),
+                        Tab::Cartoes => crate::screens::cards::show(ui, app),
+                        Tab::Casa => crate::screens::house::show(ui, app),
+                        Tab::Consultor => crate::screens::consultor::show(ui, app),
+                    }
+                });
         });
     if !pareando {
         modal_quem(ui, app);
@@ -675,8 +684,33 @@ fn modal_quem(ui: &mut Ui, app: &mut MobileApp) {
 }
 
 impl eframe::App for MobileApp {
+    #[cfg(target_os = "android")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        let (Some(app), Some(screen)) = (&self.android_app, input.screen_rect) else { return };
+        let rect = app.content_rect();
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        let scale = input.viewport().native_pixels_per_point.unwrap_or(1.0) * ctx.zoom_factor();
+        input.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
+            left: rect.left.max(0) as f32 / scale,
+            right: (screen.width() - rect.right as f32 / scale).max(0.0),
+            top: rect.top.max(0) as f32 / scale,
+            bottom: (screen.height() - rect.bottom as f32 / scale).max(0.0),
+        }));
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        update(self, ui);
+        let seguro = ui.ctx().content_rect();
+        if seguro == ui.max_rect() {
+            update(self, ui);
+            return;
+        }
+        ui.painter().rect_filled(ui.max_rect(), 0.0, theme::cores().pill);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(seguro), |ui| {
+            ui.set_clip_rect(seguro);
+            update(self, ui);
+        });
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -689,8 +723,8 @@ impl eframe::App for MobileApp {
     }
 }
 
-/// Topo: menu, avatares, nome e sininho — faixa branca inteira.
-fn topo(parent: &mut Ui, app: &mut MobileApp) {
+/// Topo: menu, avatares, nome do app e ação de adicionar.
+fn topo(parent: &mut Ui, app: &mut MobileApp, mostrar_adicionar: bool) {
     egui::Panel::top("topo")
         .frame(Frame::new().fill(theme::cores().card).inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 12 }))
         .show(parent, |ui| {
@@ -709,20 +743,22 @@ fn topo(parent: &mut Ui, app: &mut MobileApp) {
                 ui.allocate_space(Vec2::splat(30.0));
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
-                    ui.set_min_size(Vec2::new(ui.available_width() - 44.0, 0.0));
                     ui.label(egui::RichText::new("Flounder").font(w::bold(17.0)).color(c.ink));
                     ui.label(egui::RichText::new("Finanças em casal").font(w::regular(12.0)).color(c.muted));
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let badge = "10";
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(40.0), egui::Sense::click());
-                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::BELL.to_string(), w::regular(20.0), c.ink);
-                    ui.painter().circle_filled(pos2(rect.right() - 8.0, rect.top() + 8.0), 9.0, c.red);
-                    ui.painter().text(pos2(rect.right() - 8.0, rect.top() + 8.0), Align2::CENTER_CENTER, badge, w::bold(9.0), Color32::WHITE);
-                    if resp.clicked() {
-                        // Avisos chegam na fase com API.
-                    }
-                });
+                if mostrar_adicionar {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let adicionar = egui::Button::new(
+                            egui::RichText::new(icon::PLUS).font(w::bold(22.0)).color(Color32::WHITE),
+                        ).fill(c.blue).corner_radius(14);
+                        if ui.add_sized([44.0, 44.0], adicionar).on_hover_text("Novo lançamento").clicked() {
+                            app.sheet = Some(Sheet::Lancamento(crate::screens::lancamento::Folha {
+                                tipo_despesa: true,
+                                ..Default::default()
+                            }));
+                        }
+                    });
+                }
             });
         });
 }
@@ -773,26 +809,20 @@ fn botao_seta(ui: &mut Ui, glifo: &str) -> bool {
     resp.clicked()
 }
 
-/// Tab bar flutuante branca + FAB azul, ancorados no rodapé.
+/// Navegação inferior com cinco abas em uma linha.
 fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
+    let c = theme::cores();
     egui::Panel::bottom("tabbar")
-        .frame(Frame::new().fill(theme::cores().bg).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 12 }))
-        .exact_size(74.0)
+        .frame(Frame::new().fill(c.bg).inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 8 }))
+        .exact_size(64.0)
         .show(parent, |ui| {
-            ui.horizontal(|ui| {
-                let c = theme::cores();
-                // Pílula branca com as 5 abas (deixa espaço para o FAB).
-                Frame::new()
-                    .fill(c.card)
-                    .corner_radius(255)
-                    .shadow(egui::Shadow { offset: [0, 12], blur: 34, spread: 0, color: Color32::from_rgba_unmultiplied(23, 43, 99, 45) })
-                    .inner_margin(egui::Margin::same(6))
-                    .show(ui, |ui| {
-                        // Limita min E max: nada dentro da pílula estica e empurra o FAB pra fora.
-                        let largura = (ui.available_width() - 100.0).max(0.0);
-                        ui.set_min_size(Vec2::new(largura, 50.0));
-                        ui.set_max_size(Vec2::new(largura, 50.0));
-                        let aba_largura = largura / 5.0;
+            Frame::new()
+                .fill(c.card)
+                .corner_radius(20)
+                .inner_margin(egui::Margin::same(4))
+                .show(ui, |ui| {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         let abas = [
                             (Tab::Inicio, icon::HOUSE_LINE, "Início"),
                             (Tab::Fluxo, icon::CHART_BAR, "Fluxo"),
@@ -800,176 +830,59 @@ fn tabbar(parent: &mut Ui, app: &mut MobileApp) {
                             (Tab::Casa, icon::HOUSE_SIMPLE, "Casa"),
                             (Tab::Consultor, icon::SPARKLE, "Consultor"),
                         ];
-                        // Pílula da seleção: slot criado antes do loop (fica por baixo dos ícones) e
-                        // preenchido no fim com o rect real da aba escolhida — mesmo idioma da sidebar
-                        // do desktop. O rect gravado evita recalcular margens e larguras na mão.
-                        let pill = ui.painter().add(egui::Shape::Noop);
-                        let mut rect_sel = None;
-                        // Layout explícito e abas sem espaçamento entre si: o conteúdo herdaria o
-                        // layout horizontal de fora com 8 px entre cada aba (a pílula "andava" 8 px
-                        // por aba e a pílula branca esticava 32 px a mais que o combinado com o FAB).
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            for (tab, glifo, label) in abas {
-                                let on = std::mem::discriminant(&app.tab) == std::mem::discriminant(&tab);
-                                let (rect, resp) = ui.allocate_exact_size(Vec2::new(aba_largura, 50.0), egui::Sense::click());
-                                if on {
-                                    rect_sel = Some(rect);
-                                }
-                                let centro = rect.center();
-                                let cor = if on { Color32::WHITE } else { c.faint };
-                                let (y_icone, y_label) = if on { (centro.y - 5.0, centro.y + 12.0) } else { (centro.y - 7.0, centro.y + 13.0) };
-                                ui.painter().text(pos2(centro.x, y_icone), Align2::CENTER_CENTER, glifo.to_string(), w::regular(if on { 15.0 } else { 19.0 }), cor);
-                                // Rótulo longo ("Consultor") não cabe em aba estreita: reduz a fonte se precisar.
-                                let fonte = if ui.painter().layout_no_wrap(label.to_owned(), w::semibold(9.0), cor).size().x > rect.width() - 6.0 {
-                                    8.5
-                                } else {
-                                    9.0
-                                };
-                                ui.painter().text(pos2(centro.x, y_label), Align2::CENTER_CENTER, label.to_string(), w::semibold(fonte), cor);
-                                if resp.clicked() {
-                                    app.tab = tab;
-                                }
+                        let largura = ui.available_width() / abas.len() as f32;
+                        for (tab, glifo, rotulo) in abas {
+                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(largura, 44.0), egui::Sense::click());
+                            let ativa = std::mem::discriminant(&app.tab) == std::mem::discriminant(&tab);
+                            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, ativa, rotulo));
+                            if ativa {
+                                let destaque = egui::Rect::from_center_size(rect.center(), Vec2::new(largura.min(52.0), 40.0));
+                                ui.painter().rect_filled(destaque, 14.0, c.pill);
                             }
-                        });
-                        // Pílula desliza até o left da aba escolhida (0,28 s, como no desktop).
-                        if let Some(alvo) = rect_sel {
-                            let x = w::tween(ui.ctx(), egui::Id::new("tab_pill"), alvo.left(), 0.28, alvo.left());
-                            let pr = egui::Rect::from_min_size(pos2(x, alvo.top()), alvo.size());
-                            ui.painter().set(pill, egui::Shape::rect_filled(pr, corner_radius_pill(), c.pill));
+                            let cor = if ativa { Color32::WHITE } else { c.muted };
+                            ui.painter().text(rect.center(), Align2::CENTER_CENTER, glifo, w::regular(22.0), cor);
+                            if resp.on_hover_text(rotulo).clicked() {
+                                app.tab = tab;
+                            }
                         }
                     });
-                // FAB azul colado na borda direita: right_to_left garante o respiro da pílula em 360.
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(62.0), egui::Sense::click());
-                    ui.painter().circle_filled(rect.center(), 31.0, c.blue);
-                    ui.painter().circle_filled(rect.center(), 31.0, Color32::from_rgba_unmultiplied(47, 108, 255, 110));
-                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon::PLUS.to_string(), w::bold(24.0), Color32::WHITE);
-                    if resp.clicked() {
-                        app.sheet = Some(match app.tab {
-                            // Cartões só têm folha própria na demonstração (cartões reais vêm da Pluggy).
-                            Tab::Cartoes if app.demo => Sheet::Cartao(SheetCartao::default()),
-                            _ => Sheet::Lancamento(crate::screens::lancamento::Folha::default()),
-                        });
-                    }
                 });
-            });
         });
 }
 
-fn corner_radius_pill() -> egui::CornerRadius {
-    egui::CornerRadius::same(255)
-}
-
-/// Folha do FAB: descrição + valor + dia (demo grava no mock; real grava via worker).
+/// Folha de lançamento, cartão ou ajustes.
 fn folha(parent: &mut Ui, app: &mut MobileApp) {
     let Some(sheet) = app.sheet.clone() else { return };
     let c = theme::cores();
-    egui::Area::new(egui::Id::new("folha-fundo"))
-        .anchor(Align2::LEFT_TOP, Vec2::ZERO)
-        .order(egui::Order::Foreground)
-        .show(parent, |ui| {
-            // Tela inteira: o rect herdado da Area pode vir recortado pelo layout.
-            let rect = parent.max_rect();
-            let resp = ui.allocate_rect(rect, egui::Sense::click());
-            ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(16, 24, 40, 115));
-            if resp.clicked() {
-                app.sheet = None;
-            }
-        });
-    egui::Area::new(egui::Id::new("folha"))
-        .anchor(Align2::LEFT_BOTTOM, Vec2::ZERO)
-        .order(egui::Order::Foreground)
-        .show(parent, |ui| {
-            Frame::new()
-                .fill(c.card)
-                .corner_radius(egui::CornerRadius { nw: 24, ne: 24, ..Default::default() })
-                .inner_margin(egui::Margin { left: 18, right: 18, top: 18, bottom: 20 })
-                .show(ui, |ui| {
-                    // Folha sempre de borda a borda: min e max fixados pela LARGURA DA TELA (não
-                    // pelo tamanho "lembrado" da Area, que só cresce — se algum conteúdo estoura
-                    // uma linha, a folha escapava pela direita e ficava larga para sempre).
-                    let largura = ui.ctx().content_rect().width() - 36.0; // 18 de margem de cada lado
-                    ui.set_min_width(largura);
-                    ui.set_max_width(largura);
-                    match &sheet {
-                        Sheet::Lancamento(folha) => crate::screens::lancamento::folha(ui, app, folha),
-                        Sheet::Cartao(sheet) => folha_cartao(ui, app, sheet),
-                        Sheet::Fechamento(sheet) => folha_fechamento(ui, app, sheet),
-                        Sheet::Menu => crate::screens::ajustes::folha(ui, app),
-                    }
+    let area_segura = parent.ctx().content_rect();
+    let id = egui::Id::new(("folha", std::mem::discriminant(&sheet)));
+    let area = egui::Modal::default_area(id)
+        .default_size(area_segura.size())
+        .anchor(Align2::LEFT_BOTTOM, Vec2::ZERO);
+    let frame = Frame::new()
+        .fill(c.card)
+        .corner_radius(egui::CornerRadius { nw: 24, ne: 24, ..Default::default() })
+        .inner_margin(egui::Margin { left: 18, right: 18, top: 18, bottom: 20 });
+    let modal = egui::Modal::new(id)
+        .area(area)
+        .frame(frame)
+        .backdrop_color(Color32::from_rgba_unmultiplied(16, 24, 40, 115))
+        .show(parent.ctx(), |ui| {
+            ui.set_width(area_segura.width() - frame.inner_margin.sum().x);
+            let altura = (area_segura.height() - 86.0).max(100.0);
+            ui.set_max_height(altura);
+            egui::ScrollArea::vertical()
+                .max_height(altura)
+                .auto_shrink([false, true])
+                .show(ui, |ui| match &sheet {
+                    Sheet::Lancamento(folha) => crate::screens::lancamento::folha(ui, app, folha),
+                    Sheet::Fechamento(sheet) => folha_fechamento(ui, app, sheet),
+                    Sheet::Menu => crate::screens::ajustes::folha(ui, app),
                 });
         });
-}
-
-fn folha_cartao(ui: &mut Ui, app: &mut MobileApp, sheet: &SheetCartao) {
-    let c = theme::cores();
-    ui.label(egui::RichText::new("Novo cartão").font(w::bold(17.0)).color(c.ink));
-    ui.label(egui::RichText::new("Só na demonstração: cartões reais chegam da Pluggy.").font(w::regular(13.0)).color(c.muted));
-    ui.add_space(10.0);
-    // Bancos com logo: toque escolhe; o campo de texto continua para nomes fora da lista.
-    let bancos = ["Santander", "Nubank", "Inter", "Bradesco", "Caixa", "C6 Bank", "PicPay", "Banco do Brasil"];
-    let mut banco_escolhido: Option<String> = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let limite_linha = ui.max_rect().right();
-        let inicio_linha = ui.min_rect().left();
-        for banco in bancos {
-            let logo = w::logo_key(banco).and_then(|key| w::logo_textura(key, false));
-            // Frame não participa da quebra de linha do egui (aloca o rect pronto por cima do
-            // layout, e a Area cresce pra caber): medimos o chip e quebramos a linha na mão.
-            let largura_chip = match &logo {
-                Some(logo) => (16.0 * logo.size()[0] as f32 / logo.size()[1] as f32).min(90.0) + 16.0,
-                None => ui.painter().layout_no_wrap(banco.to_owned(), w::semibold(12.0), c.ink).size().x + 16.0,
-            };
-            if ui.cursor().left() > inicio_linha && ui.cursor().left() + largura_chip > limite_linha {
-                ui.end_row();
-            }
-            let escolhido = sheet.banco == *banco;
-            let resp = Frame::new()
-                .fill(if escolhido { c.blue_soft } else { c.line })
-                .corner_radius(10)
-                .inner_margin(egui::Margin::symmetric(8, 6))
-                .show(ui, |ui| match &logo {
-                    Some(logo) => {
-                        let nat = logo.size();
-                        let altura = 16.0;
-                        let largura = (altura * nat[0] as f32 / nat[1] as f32).min(90.0);
-                        ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(logo, Vec2::new(largura, altura))));
-                    }
-                    None => {
-                        ui.label(egui::RichText::new(banco.to_string()).font(w::semibold(12.0)).color(c.ink));
-                    }
-                })
-                .response
-                .interact(egui::Sense::click());
-            if resp.clicked() {
-                banco_escolhido = Some((*banco).to_owned());
-            }
-        }
-    });
-    ui.add_space(10.0);
-    let mut banco = banco_escolhido.unwrap_or_else(|| sheet.banco.clone());
-    let mut limite = sheet.limite.clone();
-    let mut venc = sheet.venc.clone();
-    let mut fecha = sheet.fecha.clone();
-    campo(ui, "Banco (toque acima ou escreva)", &mut banco, "Ex.: Santander Unique");
-    campo(ui, "Limite (R$)", &mut limite, "0,00");
-    ui.columns(2, |c| {
-        campo(&mut c[0], "Fecha no dia", &mut fecha, "1-31");
-        campo(&mut c[1], "Vence no dia", &mut venc, "1-31");
-    });
-    if let Some(Sheet::Cartao(s)) = app.sheet.as_mut() {
-        s.banco = banco.clone();
-        s.limite = limite.clone();
-        s.venc = venc.clone();
-        s.fecha = fecha.clone();
+    if modal.should_close() {
+        app.sheet = None;
     }
-    if sheet.tried {
-        ui.label(egui::RichText::new("Preencha banco, limite e dias válidos.").font(w::regular(12.0)).color(c.red));
-    }
-    ui.add_space(14.0);
-    acoes_folha(ui, app, |app| salvar_cartao(app));
 }
 
 /// Folha do fechamento de um cartão conectado: dia (1-31), "Aplicar" e "Remover ajuste"
@@ -986,7 +899,7 @@ fn folha_fechamento(ui: &mut Ui, app: &mut MobileApp, sheet: &FolhaFechamento) {
     );
     ui.add_space(8.0);
     let mut dia = sheet.dia.clone();
-    campo(ui, "Fecha no dia (1-31; vazio = mês civil)", &mut dia, "Ex.: 20");
+    theme::campo(ui, "Fecha no dia (1-31; vazio = mês civil)", &mut dia, "Ex.: 20", false);
     if let Some(Sheet::Fechamento(s)) = app.sheet.as_mut() {
         s.dia = dia;
     }
@@ -1033,66 +946,4 @@ fn aplicar_fechamento(app: &mut MobileApp) {
     }
     app.sheet = None;
     app.definir_fechamento(&sheet.card, Some(dia));
-}
-
-fn acoes_folha(ui: &mut Ui, app: &mut MobileApp, salvar: impl FnOnce(&mut MobileApp)) {
-    let c = theme::cores();
-    ui.horizontal(|ui| {
-        // Duas metades iguais com 10 px de respiro (o espaçamento é contado na largura).
-        ui.spacing_mut().item_spacing.x = 10.0;
-        let metade = (ui.available_width() - 10.0) / 2.0;
-        if ui.add_sized([metade, 44.0], egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14)).clicked() {
-            app.sheet = None;
-        }
-        if ui.add_sized([ui.available_width(), 44.0], egui::Button::new(egui::RichText::new("Salvar").font(w::bold(15.0)).color(Color32::WHITE)).fill(c.blue).corner_radius(14)).clicked() {
-            salvar(app);
-        }
-    });
-}
-
-fn campo(ui: &mut Ui, rotulo: &str, buf: &mut String, dica: &str) -> egui::Response {
-    let c = theme::cores();
-    ui.label(egui::RichText::new(rotulo).font(w::semibold(12.0)).color(c.muted));
-    let resp = ui.add_sized([ui.available_width(), 42.0], egui::TextEdit::singleline(buf).hint_text(egui::RichText::new(dica).color(c.faint)).font(w::regular(15.0)));
-    ui.add_space(6.0);
-    resp
-}
-
-/// Novo lançamento: demo grava no mock; real faz upsert no `data` e grava via worker.
-/// Novo cartão (só demonstração: cartões reais vêm da Pluggy).
-fn salvar_cartao(app: &mut MobileApp) {
-    let Some(Sheet::Cartao(sheet)) = app.sheet.as_ref().cloned() else { return };
-    // Mesmo parser inteiro do desktop: "1.234,56", "1234.56", "R$ 50".
-    let limite_cents = flounder::model::parse_money(&sheet.limite).unwrap_or(0);
-    let vence: u8 = sheet.venc.trim().parse().unwrap_or(0);
-    let fecha: u8 = sheet.fecha.trim().parse().unwrap_or(0);
-    if sheet.banco.trim().is_empty() || limite_cents <= 0 || vence == 0 || vence > 31 || fecha == 0 || fecha > 31 {
-        if let Some(Sheet::Cartao(s)) = app.sheet.as_mut() {
-            s.tried = true;
-        }
-        return;
-    }
-    let fecha_dias = crate::converter::fecha_em_dias(Some(fecha as u32), flounder::model::today());
-    let cor = mock::CORES_BANCOS[app.dados.cartoes.cards.len() % mock::CORES_BANCOS.len()];
-    let mes = app.mes_label().split_whitespace().next().unwrap_or("do mês").to_lowercase();
-    app.dados.cartoes.cards.push(mock::Cartao {
-        banco: sheet.banco.trim().to_owned(),
-        cor,
-        aberta: true,
-        fecha_dias,
-        fechamento_dia: Some(fecha),
-        vence_dia: vence,
-        fatura_label: format!("Fatura de {mes}"),
-        total_cents: 0,
-        compras: 0,
-        proximo_total_cents: 0,
-        proximo_qtd: 0,
-        proximas: Vec::new(),
-        disponivel_cents: limite_cents,
-        limite_cents,
-        paga: false,
-    });
-    app.dados.cartoes.total_faturas_cents = app.dados.cartoes.cards.iter().map(|c| c.total_cents).sum();
-    app.sheet = None;
-    app.tab = Tab::Cartoes;
 }

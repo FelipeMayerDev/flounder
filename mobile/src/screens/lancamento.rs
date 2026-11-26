@@ -4,7 +4,7 @@
 
 use egui::Color32;
 use egui_phosphor::regular as icon;
-use flounder::model::{Category, Entry, Kind};
+use flounder::model::{Category, Entry, Kind, Month};
 use flounder::widgets as w;
 
 use crate::app::MobileApp;
@@ -33,6 +33,7 @@ pub struct Folha {
     /// Conta fixa que repete todo mês; preservado na edição (a folha não mexe nele).
     pub recurring: bool,
     pub tried: bool,
+    pub confirmar_exclusao: bool,
 }
 
 /// Abre a folha preenchida com os campos de uma entrada existente (toque na linha do Fluxo).
@@ -51,8 +52,7 @@ pub fn folha_editar(app: &mut MobileApp, id: u32) {
             desc: e.desc.clone(),
             valor: crate::app::fmt_money(e.centavos.abs()),
             dia: dia.to_string(),
-            // O mock não carrega categoria: a edição começa em Outros.
-            categoria: Some(Category::Other),
+            categoria: Some(e.categoria),
             shared: e.shared,
             paga: e.paid,
             connected_id: cartao_conectado(app, e.card.as_deref()),
@@ -61,6 +61,7 @@ pub fn folha_editar(app: &mut MobileApp, id: u32) {
             imported: false,
             recurring: false,
             tried: false,
+            confirmar_exclusao: false,
         }
     } else {
         let Some(e) = app.data.entry(id) else { return };
@@ -79,6 +80,7 @@ pub fn folha_editar(app: &mut MobileApp, id: u32) {
             imported: e.imported,
             recurring: e.recurring,
             tried: false,
+            confirmar_exclusao: false,
         }
     };
     app.sheet = Some(crate::app::Sheet::Lancamento(folha));
@@ -115,6 +117,7 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
     let mut paga = folha.paga;
     let mut connected_id = folha.connected_id.clone();
     ui.horizontal(|ui| {
+        let largura = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
         for (despesa, rotulo, cor) in [
             (true, format!("{} Despesa", icon::ARROW_UP_RIGHT), c.red),
             (false, format!("{} Receita", icon::ARROW_DOWN_LEFT), c.green),
@@ -122,7 +125,7 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
             let on = tipo_despesa == despesa;
             if ui
                 .add_sized(
-                    [ui.available_width() / 2.0 - 4.0, 36.0],
+                    [largura, 40.0],
                     egui::Button::new(
                         egui::RichText::new(rotulo)
                             .font(w::semibold(13.0))
@@ -146,44 +149,17 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
     let mut desc = folha.desc.clone();
     let mut valor = folha.valor.clone();
     let mut dia = folha.dia.clone();
-    campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz");
-    campo(ui, "Valor (R$)", &mut valor, "0,00");
-    campo(ui, "Dia do mês", &mut dia, "1-31");
-    if let Some(crate::app::Sheet::Lancamento(f)) = app.sheet.as_mut() {
-        f.desc = desc.clone();
-        f.valor = valor.clone();
-        f.dia = dia.clone();
-        f.categoria = folha.categoria;
-        f.shared = folha.shared;
-        f.paga = folha.paga;
-    }
+    let ultimo_dia = Month { y: app.y, m: app.m.into() }.days();
+    theme::campo(ui, "Descrição", &mut desc, "Ex.: Conta de luz", false);
+    theme::campo(ui, "Valor", &mut valor, "0,00", true);
+    theme::campo(ui, "Dia do mês", &mut dia, &format!("1 a {ultimo_dia}"), false);
 
-    // Categoria (só despesa): chips em grade.
-    if folha.tipo_despesa {
-        ui.label(egui::RichText::new("Categoria").font(w::semibold(12.0)).color(c.muted));
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.spacing_mut().item_spacing.y = 4.0;
-            for cat in Category::ALL {
-                let on = categoria == Some(cat) || (categoria.is_none() && cat == Category::Other);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(cat.label())
-                                .font(w::semibold(11.5))
-                                .color(if on { Color32::WHITE } else { c.ink }),
-                        )
-                        .fill(if on { c.blue } else { c.line })
-                        .corner_radius(255),
-                    )
-                    .clicked()
-                {
-                    categoria = Some(cat);
-                }
-            }
-        });
+    if tipo_despesa {
+        selecionar_categoria(ui, &mut categoria, &c);
         ui.add_space(8.0);
-        ui.checkbox(&mut shared, "Despesa da casa (compartilhada)");
+        if ui.checkbox(&mut shared, "Despesa da casa (compartilhada)").changed() && shared {
+            connected_id = None;
+        }
         // Compra no cartão conectado (despesa pessoal): chips "À vista" + os cartões.
         if !shared {
             let cartoes: Vec<(&str, &str)> = app
@@ -230,23 +206,45 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
         }
     }
     if let Some(crate::app::Sheet::Lancamento(f)) = app.sheet.as_mut() {
+        f.desc = desc.clone();
+        f.valor = valor.clone();
+        f.dia = dia.clone();
         f.tipo_despesa = tipo_despesa;
         f.categoria = categoria;
         f.shared = shared;
         f.paga = paga;
         f.connected_id = connected_id.clone();
-        f.card_manual = folha.card_manual;
     }
-    if folha.tried {
-        ui.label(egui::RichText::new("Preencha descrição, valor e dia válidos.").font(w::regular(12.0)).color(c.red));
+    if folha.tried && let Err(erro) = validar(&desc, &valor, &dia, ultimo_dia) {
+        ui.label(egui::RichText::new(erro).font(w::regular(12.0)).color(c.red));
     }
     ui.add_space(14.0);
+    if folha.confirmar_exclusao {
+        ui.label(egui::RichText::new("Excluir este lançamento?").font(w::semibold(14.0)).color(c.ink));
+        ui.horizontal(|ui| {
+            let largura = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            if ui.add_sized([largura, 44.0], egui::Button::new("Manter lançamento")).clicked()
+                && let Some(crate::app::Sheet::Lancamento(f)) = app.sheet.as_mut()
+            {
+                f.confirmar_exclusao = false;
+            }
+            if ui.add_sized([largura, 44.0], egui::Button::new(
+                egui::RichText::new("Confirmar exclusão").color(c.red),
+            ).fill(c.red_soft)).clicked() {
+                app.excluir_entrada(folha.id);
+                app.sheet = None;
+            }
+        });
+        return;
+    }
+
     let excluir = folha.id != 0;
     ui.horizontal(|ui| {
         let partes = if excluir { 3.0 } else { 2.0 };
+        let largura = (ui.available_width() - (partes - 1.0) * ui.spacing().item_spacing.x) / partes;
         if ui
             .add_sized(
-                [ui.available_width() / partes - 5.0, 44.0],
+                [largura, 44.0],
                 egui::Button::new(egui::RichText::new("Cancelar").font(w::semibold(15.0)).color(c.ink)).fill(c.line).corner_radius(14),
             )
             .clicked()
@@ -254,7 +252,6 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
             app.sheet = None;
         }
         if excluir {
-            let largura = ui.available_width() / 2.0 - 5.0;
             if ui
                 .add_sized(
                     [largura, 44.0],
@@ -265,15 +262,14 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
                     .corner_radius(14),
                 )
                 .clicked()
+                && let Some(crate::app::Sheet::Lancamento(f)) = app.sheet.as_mut()
             {
-                let id = folha.id;
-                app.excluir_entrada(id);
+                f.confirmar_exclusao = true;
             }
         }
-        let largura_salvar = ui.available_width();
         if ui
             .add_sized(
-                [largura_salvar, 44.0],
+                [largura, 44.0],
                 egui::Button::new(egui::RichText::new("Salvar").font(w::bold(15.0)).color(Color32::WHITE)).fill(c.blue).corner_radius(14),
             )
             .clicked()
@@ -283,14 +279,43 @@ pub fn folha(ui: &mut egui::Ui, app: &mut MobileApp, folha: &Folha) {
     });
 }
 
-fn campo(ui: &mut egui::Ui, rotulo: &str, buf: &mut String, dica: &str) {
-    let c = theme::cores();
-    ui.label(egui::RichText::new(rotulo).font(w::semibold(12.0)).color(c.muted));
-    ui.add_sized(
-        [ui.available_width(), 42.0],
-        egui::TextEdit::singleline(buf).hint_text(egui::RichText::new(dica).color(c.faint)).font(w::regular(15.0)),
-    );
-    ui.add_space(6.0);
+fn validar(desc: &str, valor: &str, dia: &str, ultimo_dia: u32) -> Result<(i64, u32), String> {
+    if desc.trim().is_empty() {
+        return Err("Informe a descrição.".into());
+    }
+    let centavos = flounder::model::parse_money(valor)
+        .filter(|&valor| valor > 0)
+        .ok_or("Informe um valor maior que zero.")?;
+    let dia = dia.trim().parse::<u32>().ok()
+        .filter(|dia| (1..=ultimo_dia).contains(dia))
+        .ok_or_else(|| format!("Informe um dia entre 1 e {ultimo_dia}."))?;
+    Ok((centavos, dia))
+}
+
+fn selecionar_categoria(ui: &mut egui::Ui, categoria: &mut Option<Category>, c: &theme::Cores) {
+    let etiqueta = ui.label(egui::RichText::new("Categoria").font(w::semibold(12.0)).color(c.muted));
+    let atual = categoria.unwrap_or(Category::Other);
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 12.0);
+        ui.spacing_mut().icon_width = 18.0;
+        egui::ComboBox::from_id_salt("categoria")
+            .width(ui.available_width())
+            .height(260.0)
+            .selected_text(egui::RichText::new(atual.label()).font(w::regular(14.0)).color(c.ink))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| {
+                ui.spacing_mut().interact_size.y = 38.0;
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min).with_cross_justify(true), |ui| {
+                    for cat in Category::ALL {
+                        if ui.selectable_label(cat == atual, egui::RichText::new(cat.label()).font(w::regular(14.0))).clicked() {
+                            *categoria = Some(cat);
+                            ui.close();
+                        }
+                    }
+                });
+            })
+            .response.labelled_by(etiqueta.id);
+    });
 }
 
 /// Monta a `Entry` do estado da folha e salva (novo: upsert atribui id; edição: mantém).
@@ -301,16 +326,13 @@ fn salvar(app: &mut MobileApp) {
     }) else {
         return;
     };
-    // Mesmo parser inteiro do desktop: "1.234,56", "1234.56", "R$ 50". Valor inválido
-    // vira zero e cai na validação de baixo, como antes.
-    let centavos = flounder::model::parse_money(&folha.valor).unwrap_or(0);
-    let dia: u32 = folha.dia.trim().parse().unwrap_or(0);
-    if folha.desc.trim().is_empty() || centavos == 0 || dia == 0 || dia > 31 {
+    let mes = Month { y: app.y, m: app.m.into() };
+    let Ok((centavos, dia)) = validar(&folha.desc, &folha.valor, &folha.dia, mes.days()) else {
         if let Some(crate::app::Sheet::Lancamento(f)) = app.sheet.as_mut() {
             f.tried = true;
         }
         return;
-    }
+    };
     let owner = folha
         .owner
         .unwrap_or_else(|| if app.eu == 1 { flounder::model::Person::B } else { flounder::model::Person::A });
@@ -322,7 +344,7 @@ fn salvar(app: &mut MobileApp) {
         id: folha.id,
         desc: folha.desc.trim().to_owned(),
         amount: centavos,
-        date: flounder::model::Date { y: app.y, m: app.m as u32, d: dia },
+        date: mes.day(dia),
         kind: if folha.tipo_despesa { Kind::Expense } else { Kind::Income },
         category: folha.categoria.unwrap_or(Category::Other),
         owner,

@@ -39,6 +39,7 @@ pub(crate) fn rotulo_categoria(key: &str) -> &'static str {
         "shopping" => "Compras",
         "services" => "Serviços",
         "education" => "Educação",
+        "pets" => "Pets",
         "other" => "Outros",
         _ => "Categoria",
     }
@@ -81,19 +82,7 @@ fn banner_fechamento(ui: &mut egui::Ui, banco: &str, dias: u32, c: &Cores) {
 fn card_orcamentos(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     let orcamentos: Vec<(String, i64, i64)> = app.dados.orcamentos.clone();
     theme::card(ui, |ui| {
-        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new("Orçamento do mês").font(w::bold(16.0)).color(c.ink));
-                ui.label(
-                    egui::RichText::new("O que você já usou do limite de cada categoria.")
-                        .font(w::regular(12.0))
-                        .color(c.muted),
-                );
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                w::art(ui, w::Art::MoneyBag, 44.0);
-            });
-        });
+        cabecalho(ui, "Orçamento do mês", "Quanto do limite você já usou por categoria.", w::Art::MoneyBag, c);
         ui.add_space(10.0);
         for (categoria, gasto, limite) in &orcamentos {
             let frac = if *limite > 0 { *gasto as f32 / *limite as f32 } else { 0.0 };
@@ -129,19 +118,7 @@ fn card_orcamentos(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
 fn card_alertas(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     let alertas: Vec<(String, i64, i64)> = app.dados.alertas_preco.clone();
     theme::card(ui, |ui| {
-        ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new("Alertas de preço").font(w::bold(16.0)).color(c.ink));
-                ui.label(
-                    egui::RichText::new("Contas que fugiram da média dos meses anteriores.")
-                        .font(w::regular(12.0))
-                        .color(c.muted),
-                );
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                w::art(ui, w::Art::SpiralCalendar, 44.0);
-            });
-        });
+        cabecalho(ui, "Alertas de preço", "Contas acima da média dos meses anteriores.", w::Art::SpiralCalendar, c);
         ui.add_space(10.0);
         for (desc, recente, media) in &alertas {
             ui.horizontal(|ui| {
@@ -157,6 +134,18 @@ fn card_alertas(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
             });
             ui.add_space(6.0);
         }
+    });
+}
+
+fn cabecalho(ui: &mut egui::Ui, titulo: &str, subtitulo: &str, arte: w::Art, c: &Cores) {
+    ui.horizontal_top(|ui| {
+        let largura = ui.available_width() - 44.0 - ui.spacing().item_spacing.x;
+        ui.allocate_ui_with_layout(Vec2::new(largura, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(largura);
+            ui.label(egui::RichText::new(titulo).font(w::bold(16.0)).color(c.ink));
+            ui.add(egui::Label::new(egui::RichText::new(subtitulo).font(w::regular(12.0)).color(c.muted)).wrap());
+        });
+        w::art(ui, arte, 44.0);
     });
 }
 
@@ -251,7 +240,6 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Renda do mês").font(w::regular(13.0)).color(c.muted));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(egui::RichText::new(icon::PENCIL_SIMPLE).font(w::regular(16.0)).color(c.muted));
                         theme::money(ui, app.dados.salario_cents, 15.0, c.ink);
                     });
                 });
@@ -263,7 +251,8 @@ fn card_saldo(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
 /// das contas do dia com bolinha de pago (toque alterna; demo inverte localmente).
 fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     // Dia selecionado na tira (lembra entre frames; padrão = destaque do mock).
-    let lembrado = ui.memory(|m| m.data.get_temp::<u8>(egui::Id::new("pagar-dia")));
+    let dia_id = ui.make_persistent_id("pagar-dia");
+    let lembrado = ui.memory(|m| m.data.get_temp::<u8>(dia_id));
     let dia_sel = match lembrado {
         Some(d) if app.dados.pagar.dias.iter().any(|x| x.0 == d) => d,
         _ => app.dados.pagar.dia,
@@ -297,6 +286,7 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
     let todo_pago = tem_contas && pendente_dia == 0;
 
     theme::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
             ui.label(
                 egui::RichText::new(format!("Contas a pagar · dia {dia_sel}"))
@@ -323,7 +313,9 @@ fn card_pagar(ui: &mut egui::Ui, app: &mut MobileApp, c: &Cores) {
             ui.set_min_height(60.0);
             ui.horizontal(|ui| {
                 for (dia, _, total) in &app.dados.pagar.dias {
-                    chip_dia(ui, *dia, *total, dia_sel, c);
+                    if chip_dia(ui, *dia, *total, dia_sel, c).clicked() {
+                        ui.memory_mut(|m| m.data.insert_temp(dia_id, *dia));
+                    }
                     ui.add_space(8.0);
                 }
             });
@@ -373,7 +365,7 @@ fn alternar_conta(app: &mut MobileApp, idx: usize, acao: &mock::Acao) {
 
 /// Caixinha da tira: dia em cima, total curto embaixo; azul quando selecionada.
 /// Largura mínima de 56 px e cresce conforme o total, para nada ficar cortado.
-fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &Cores) {
+fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &Cores) -> egui::Response {
     let on = dia == selecionado;
     let (cor_dia, cor_total) = if on {
         (Color32::WHITE, Color32::from_rgba_unmultiplied(255, 255, 255, 200))
@@ -402,9 +394,7 @@ fn chip_dia(ui: &mut egui::Ui, dia: u8, total_cents: i64, selecionado: u8, c: &C
         w::regular(10.5),
         cor_total,
     );
-    if resp.clicked() {
-        ui.memory_mut(|m| m.data.insert_temp(egui::Id::new("pagar-dia"), dia));
-    }
+    resp
 }
 
 /// Total curto para a tira: corta os centavos ("R$ 849", "R$ 8.712") e abrevia
